@@ -1,9 +1,11 @@
 #include "dns32.h"
 #include "dns32_nvs.h"
 #include "dns32_wifi.h"
+#include "dns32_http.h"
 
 void app_main(void)
 {
+    httpd_handle_t *server = NULL;
     ESP_ERROR_CHECK(esp_netif_init());
     // Need to handle ESP_ERR_NVS_NO_FREE_PAGES and ESP_ERR_NVS_NEW_VERSION_FOUND
     ESP_ERROR_CHECK(nvs_flash_init());
@@ -28,8 +30,11 @@ void app_main(void)
     ESP_LOGI(TAG_AP, "Dummy AP log");
     ESP_LOGI(TAG_DNS32, "Dummy DNS32 log");
     ESP_LOGI(TAG_STA, "Dummy STA log");
+    ESP_LOGI(TAG_HTTP, "Dummy HTTP log");
+    assert(server == NULL);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(start_webserver(server));
 
-    while (true)
+    while (server)
     {
         vTaskDelay(100000 / portTICK_PERIOD_MS);
     }

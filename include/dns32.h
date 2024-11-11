@@ -14,3 +14,4 @@
 static const char *TAG_DNS32 = "dns32";
 static const char *TAG_AP = "softap";
 static const char *TAG_STA = "sta";
+static const char *TAG_HTTP = "http";
