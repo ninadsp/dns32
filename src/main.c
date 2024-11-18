@@ -34,7 +34,7 @@ void app_main(void)
     assert(server == NULL);
     ESP_ERROR_CHECK_WITHOUT_ABORT(start_webserver(server));
 
-    while (server)
+    while (server != NULL)
     {
         vTaskDelay(100000 / portTICK_PERIOD_MS);
     }

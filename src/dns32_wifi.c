@@ -1,11 +1,14 @@
 #include "dns32.h"
 #include "dns32_wifi.h"
 
+//int32_t wifi_scan_last_status = NULL;
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     if (event_id == WIFI_EVENT_SCAN_DONE)
     {
         ESP_LOGI(TAG_AP, "WiFi scan completed in the background");
+        //wifi_scan_last_status = WIFI_EVENT_SCAN_DONE;
         log_wifi_scan_to_serial();
     }
 };
@@ -67,6 +70,7 @@ esp_err_t initiate_wifi_scan_async()
     assert(netif_station);
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_scan_start(NULL, false));
+//    wifi_scan_last_status = WIFI_EVENT_??;
     ESP_LOGI(TAG_AP, "Triggered wifi scan");
 
     return ESP_OK;
@@ -97,5 +101,25 @@ esp_err_t log_wifi_scan_to_serial()
 
     ESP_LOGI(TAG_STA, "Done scanning and printing all networks");
     free(neighbouring_aps);
+    return ESP_OK;
+};
+
+esp_err_t is_wifi_scan_done(bool *status) {
+    return ESP_OK;
+};
+
+esp_err_t get_wifi_scan_results(wifi_ap_record_t *scan_results) {
+    return ESP_OK;
+};
+
+esp_err_t get_current_ip_address(esp_ip4_addr_t *ip_address) {
+    esp_netif_t *default_netif_stack;
+    esp_netif_ip_info_t ip_info;
+
+    default_netif_stack = esp_netif_get_default_netif();
+    ESP_RETURN_ON_ERROR(esp_netif_get_ip_info(default_netif_stack, &ip_info), TAG_STA, "Cannot query for IP address of the device");
+
+    *ip_address = ip_info.ip;
+
     return ESP_OK;
 };

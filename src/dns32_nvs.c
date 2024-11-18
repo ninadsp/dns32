@@ -15,6 +15,7 @@ esp_err_t is_wifi_stored()
 /*
 We only call this when is_mb_wifi_stored has returned true
 So, the only reason nvs_open will fail is due to memory or other real hardware failures
+return string lengths so that the callign function can prepare for it
 */
 esp_err_t get_wifi_credentials(char *ssid, char *password)
 {

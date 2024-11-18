@@ -14,3 +14,6 @@ esp_err_t setup_softap();
 esp_err_t setup_station();
 esp_err_t initiate_wifi_scan_async();
 esp_err_t log_wifi_scan_to_serial();
+esp_err_t is_wifi_scan_done(bool *status);
+esp_err_t get_wifi_scan_results(wifi_ap_record_t *scan_results);
+esp_err_t get_current_ip_address(esp_ip4_addr_t *ip_address);
