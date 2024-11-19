@@ -1,15 +1,15 @@
 #include "dns32.h"
 #include "dns32_wifi.h"
 
-//int32_t wifi_scan_last_status = NULL;
+int32_t wifi_scan_last_status = NULL;
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     if (event_id == WIFI_EVENT_SCAN_DONE)
     {
         ESP_LOGI(TAG_AP, "WiFi scan completed in the background");
-        //wifi_scan_last_status = WIFI_EVENT_SCAN_DONE;
-        log_wifi_scan_to_serial();
+        wifi_scan_last_status = DNS32_WIFI_SCAN_COMPLETED;
+        //log_wifi_scan_to_serial();
     }
 };
 
@@ -23,8 +23,8 @@ esp_err_t setup_station()
 {
     char *station_ssid;
     char *station_password;
-    station_ssid = malloc(32);
-    station_password = malloc(64);
+    station_ssid = malloc(MAX_SSID_LEN + 1);
+    station_password = malloc(MAX_PASSPHRASE_LEN + 1);
     assert(station_ssid != NULL);
     assert(station_password != NULL);
     ESP_ERROR_CHECK_WITHOUT_ABORT(get_wifi_credentials(station_ssid, station_password));
@@ -70,7 +70,7 @@ esp_err_t initiate_wifi_scan_async()
     assert(netif_station);
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_scan_start(NULL, false));
-//    wifi_scan_last_status = WIFI_EVENT_??;
+    wifi_scan_last_status = DNS32_WIFI_SCAN_STARTED;
     ESP_LOGI(TAG_AP, "Triggered wifi scan");
 
     return ESP_OK;
@@ -104,22 +104,47 @@ esp_err_t log_wifi_scan_to_serial()
     return ESP_OK;
 };
 
-esp_err_t is_wifi_scan_done(bool *status) {
+esp_err_t is_wifi_scan_done(bool *status)
+{
+    *status = false;
+    if (wifi_scan_last_status == DNS32_WIFI_SCAN_COMPLETED) {
+        *status = true;
+    }
     return ESP_OK;
 };
 
-esp_err_t get_wifi_scan_results(wifi_ap_record_t *scan_results) {
-    return ESP_OK;
+esp_err_t get_wifi_scan_results(uint16_t *count, wifi_ap_record_t *scan_results)
+{
+    uint16_t number = DNS32_WIFI_AP_MAX_APS;
+    scan_results = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * number);
+    count = (uint16_t *)malloc(sizeof(uint16_t));
+
+    if (scan_results == NULL)
+    {
+        ESP_LOGE(TAG_AP, "No memory available to allocate for scan results");
+        return ESP_ERR_NO_MEM;
+    }
+
+    memset(scan_results, 0, sizeof(wifi_ap_record_t) * number);
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(count));
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, scan_results));
+
+   return ESP_OK;
 };
 
-esp_err_t get_current_ip_address(esp_ip4_addr_t *ip_address) {
+esp_err_t get_current_ip_address(char *ip_address)
+{
     esp_netif_t *default_netif_stack;
     esp_netif_ip_info_t ip_info;
 
     default_netif_stack = esp_netif_get_default_netif();
     ESP_RETURN_ON_ERROR(esp_netif_get_ip_info(default_netif_stack, &ip_info), TAG_STA, "Cannot query for IP address of the device");
-
-    *ip_address = ip_info.ip;
+    char *rc = esp_ip4addr_ntoa(&ip_info.ip, ip_address, IP4ADDR_STRLEN_MAX);
+    if (rc == NULL)
+    {
+        ESP_LOGI(TAG_STA, "Failed converting IP address to string");
+        return ESP_FAIL;
+    }
 
     return ESP_OK;
 };
