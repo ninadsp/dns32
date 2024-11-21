@@ -56,7 +56,7 @@ const char *HTML_FRAGMENT_WIFI_SELECTOR_TABLE_FOOTER = "      </tbody>\n"
 "		<script>\n"
 "		function setInput(wifiIndex) {\n"
 "			let inputField = document.querySelector('#wifiindex');\n"
-"			inputField.value(wifiIndex);\n"
+"			inputField.value = wifiIndex;\n"
 "		}\n"
 "		</script>\n";
 

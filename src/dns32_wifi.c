@@ -2,14 +2,26 @@
 #include "dns32_wifi.h"
 
 int32_t wifi_scan_last_status = NULL;
+uint16_t count = 0;
+wifi_ap_record_t scan_results[DNS32_WIFI_AP_MAX_APS];
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     if (event_id == WIFI_EVENT_SCAN_DONE)
     {
         ESP_LOGI(TAG_AP, "WiFi scan completed in the background");
-        wifi_scan_last_status = DNS32_WIFI_SCAN_COMPLETED;
-        //log_wifi_scan_to_serial();
+        uint16_t number = DNS32_WIFI_AP_MAX_APS;
+
+        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&count));
+        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, &scan_results));
+        if (count == 0)
+        {
+            wifi_scan_last_status = DNS32_WIFI_SCAN_FAILED;
+        }
+        else
+        {
+            wifi_scan_last_status = DNS32_WIFI_SCAN_COMPLETED;
+        }
     }
 };
 
@@ -76,60 +88,22 @@ esp_err_t initiate_wifi_scan_async()
     return ESP_OK;
 };
 
-esp_err_t log_wifi_scan_to_serial()
-{
-    uint16_t count = 0;
-    uint16_t number = DNS32_WIFI_AP_MAX_APS;
-    wifi_ap_record_t *neighbouring_aps = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * number);
-
-    if (neighbouring_aps == NULL)
-    {
-        ESP_LOGE(TAG_AP, "No memory available to allocate for scan results");
-        return ESP_ERR_NO_MEM;
-    }
-
-    memset(neighbouring_aps, 0, sizeof(wifi_ap_record_t) * number);
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&count));
-    ESP_LOGI(TAG_AP, "Current count of networks scanned is %u", count);
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, neighbouring_aps));
-    ESP_LOGI(TAG_STA, "Total APs scanned: %u, actual APs found:%u", number, count);
-
-    for (int i = 0; i < count; i++)
-    {
-        ESP_LOGI(TAG_STA, "SSID: %s, RSSI: %d, Auth: ", neighbouring_aps[i].ssid, neighbouring_aps[i].rssi);
-    }
-
-    ESP_LOGI(TAG_STA, "Done scanning and printing all networks");
-    free(neighbouring_aps);
-    return ESP_OK;
-};
-
 esp_err_t is_wifi_scan_done(bool *status)
 {
     *status = false;
-    if (wifi_scan_last_status == DNS32_WIFI_SCAN_COMPLETED) {
+    if (wifi_scan_last_status == DNS32_WIFI_SCAN_COMPLETED)
+    {
         *status = true;
     }
     return ESP_OK;
 };
 
-esp_err_t get_wifi_scan_results(uint16_t *count, wifi_ap_record_t *scan_results)
+esp_err_t get_wifi_scan_results(uint16_t *out_count, wifi_ap_record_t *out_scan_results)
 {
-    uint16_t number = DNS32_WIFI_AP_MAX_APS;
-    scan_results = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * number);
-    count = (uint16_t *)malloc(sizeof(uint16_t));
+    *out_count = count;
+    memcpy(out_scan_results, scan_results, count * sizeof(wifi_ap_record_t));
 
-    if (scan_results == NULL)
-    {
-        ESP_LOGE(TAG_AP, "No memory available to allocate for scan results");
-        return ESP_ERR_NO_MEM;
-    }
-
-    memset(scan_results, 0, sizeof(wifi_ap_record_t) * number);
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(count));
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, scan_results));
-
-   return ESP_OK;
+    return ESP_OK;
 };
 
 esp_err_t get_current_ip_address(char *ip_address)

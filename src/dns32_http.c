@@ -15,8 +15,6 @@ static esp_err_t hello_get_handler(httpd_req_t *req)
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
     ESP_LOGI(TAG_HTTP, "Received Index get request");
-    // We need the current IP address, state of wifi scanning,
-    // and the list of wifi APs in range, if the scan has completed
 
     ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req,
                                               HTML_FRAGMENT_COMMON_HEADER,
@@ -40,6 +38,7 @@ static esp_err_t index_get_handler(httpd_req_t *req)
                         TAG_HTTP,
                         "Error sending index handler");
 
+    // TODO: Make all this idiomatic
     char *buffer2 = NULL;
     bool wifi_scan_status = false;
     is_wifi_scan_done(&wifi_scan_status);
@@ -66,23 +65,28 @@ static esp_err_t index_get_handler(httpd_req_t *req)
     free(buffer2);
     ESP_RETURN_ON_ERROR(chunk_sending_error, TAG_HTTP, "Error sending index handler");
 
-    if (wifi_scan_status) {
-        wifi_ap_record_t *scan_results = NULL;
-        uint16_t *count = NULL;
+    if (wifi_scan_status)
+    {
+        wifi_ap_record_t *scan_results = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * DNS32_WIFI_AP_MAX_APS);
+        uint16_t *count = (uint16_t *)malloc(sizeof(uint16_t));
         get_wifi_scan_results(count, scan_results);
 
         char *buffer3 = NULL;
-        int rc3 = asprintf(&buffer3, HTML_FRAGMENT_WIFI_SELECTOR_TABLE_HEADER, count);
-        if (rc3 < 0){
+        int rc3 = asprintf(&buffer3, HTML_FRAGMENT_WIFI_SELECTOR_TABLE_HEADER, *count);
+        if (rc3 < 0)
+        {
             ESP_LOGI(TAG_HTTP, "Unable to render wifi table header");
         }
-        else {
+        else
+        {
             httpd_resp_send_chunk(req, buffer3, strlen(buffer3));
             char *buffer4 = NULL;
             int rc4;
-            for(int i=0; i < count; i++) {
-                rc4 = asprintf(&buffer4, HTML_FRAGMENT_WIFI_SELECTOR_TABLE_BODY_ROW, scan_results[i].ssid, scan_results[i].rssi);
-                if(rc4 < 0) {
+            for (int i = 0; i < *count; i++)
+            {
+                rc4 = asprintf(&buffer4, HTML_FRAGMENT_WIFI_SELECTOR_TABLE_BODY_ROW, scan_results[i].ssid, scan_results[i].rssi, scan_results[i].rssi, scan_results[i].rssi);
+                if (rc4 < 0)
+                {
                     ESP_LOGI(TAG_HTTP, "Unable to render a Wifi table row");
                 }
                 httpd_resp_send_chunk(req, buffer4, strlen(buffer4));
@@ -94,8 +98,8 @@ static esp_err_t index_get_handler(httpd_req_t *req)
         free(buffer3);
 
         free(scan_results);
+        free(count);
     }
-    
 
     ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req,
                                               HTML_FRAGMENT_COMMON_END, strlen(HTML_FRAGMENT_COMMON_END)),
@@ -110,6 +114,7 @@ static esp_err_t index_get_handler(httpd_req_t *req)
 static esp_err_t wifi_configure_post_handler(httpd_req_t *req)
 {
     ESP_LOGW(TAG_HTTP, "Method not implemented");
+    // TODO: Implement this next
     return ESP_OK;
 };
 

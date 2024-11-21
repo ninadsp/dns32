@@ -27,10 +27,6 @@ void app_main(void)
         // Figure out how to start a web server now, and render the list of APs
     }
 
-    ESP_LOGI(TAG_AP, "Dummy AP log");
-    ESP_LOGI(TAG_DNS32, "Dummy DNS32 log");
-    ESP_LOGI(TAG_STA, "Dummy STA log");
-    ESP_LOGI(TAG_HTTP, "Dummy HTTP log");
     assert(server == NULL);
     ESP_ERROR_CHECK_WITHOUT_ABORT(start_webserver(server));
 
