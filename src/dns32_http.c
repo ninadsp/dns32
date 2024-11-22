@@ -14,6 +14,8 @@ static esp_err_t hello_get_handler(httpd_req_t *req)
 
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
+    char current_ip_address_string[IP4ADDR_STRLEN_MAX];
+    bool wifi_scan_status = false;
     ESP_LOGI(TAG_HTTP, "Received Index get request");
 
     ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req,
@@ -22,48 +24,11 @@ static esp_err_t index_get_handler(httpd_req_t *req)
                         TAG_HTTP,
                         "Error sending index handler");
 
-    char *buffer = NULL;
-    char current_ip_address_string[IP4ADDR_STRLEN_MAX];
     get_current_ip_address(current_ip_address_string);
-    int rc = asprintf(&buffer, HTML_FRAGMENT_WIFI_SELECTOR_HEADER, current_ip_address_string);
-    if (rc < 0)
-    {
-        ESP_LOGI(TAG_HTTP, "Unable to render wifi selector header fragment");
-        return ESP_FAIL;
-    }
-    esp_err_t chunk_sending_error;
-    chunk_sending_error = httpd_resp_send_chunk(req, buffer, strlen(buffer));
-    free(buffer);
-    ESP_RETURN_ON_ERROR(chunk_sending_error,
-                        TAG_HTTP,
-                        "Error sending index handler");
+    RENDER_AND_SEND_CHUNK(req, HTML_FRAGMENT_WIFI_SELECTOR_HEADER, current_ip_address_string);
 
-    // TODO: Make all this idiomatic
-    char *buffer2 = NULL;
-    bool wifi_scan_status = false;
     is_wifi_scan_done(&wifi_scan_status);
-    int rc1;
-    if (wifi_scan_status)
-    {
-        rc1 = asprintf(&buffer2, HTML_FRAGMENT_WIFI_SELECTOR_SCAN_STATUS_FRAGMENT, WIFI_STATUS_COMPLETE);
-        if (rc1 < 0)
-        {
-            ESP_LOGI(TAG_HTTP, "Unable to render wifi scan status fragment (true)");
-            return ESP_FAIL;
-        }
-    }
-    else
-    {
-        rc1 = asprintf(&buffer2, HTML_FRAGMENT_WIFI_SELECTOR_SCAN_STATUS_FRAGMENT, WIFI_STATUS_IN_PROGRESS);
-        if (rc1 < 0)
-        {
-            ESP_LOGI(TAG_HTTP, "Unable to render wifi scan status fragment (true)");
-            return ESP_FAIL;
-        }
-    }
-    chunk_sending_error = httpd_resp_send_chunk(req, buffer2, strlen(buffer2));
-    free(buffer2);
-    ESP_RETURN_ON_ERROR(chunk_sending_error, TAG_HTTP, "Error sending index handler");
+    RENDER_AND_SEND_CHUNK(req, HTML_FRAGMENT_WIFI_SELECTOR_SCAN_STATUS_FRAGMENT, wifi_scan_status ? WIFI_STATUS_COMPLETE : WIFI_STATUS_IN_PROGRESS);
 
     if (wifi_scan_status)
     {
@@ -71,32 +36,18 @@ static esp_err_t index_get_handler(httpd_req_t *req)
         uint16_t *count = (uint16_t *)malloc(sizeof(uint16_t));
         get_wifi_scan_results(count, scan_results);
 
-        char *buffer3 = NULL;
-        int rc3 = asprintf(&buffer3, HTML_FRAGMENT_WIFI_SELECTOR_TABLE_HEADER, *count);
-        if (rc3 < 0)
-        {
-            ESP_LOGI(TAG_HTTP, "Unable to render wifi table header");
-        }
-        else
-        {
-            httpd_resp_send_chunk(req, buffer3, strlen(buffer3));
-            char *buffer4 = NULL;
-            int rc4;
-            for (int i = 0; i < *count; i++)
-            {
-                rc4 = asprintf(&buffer4, HTML_FRAGMENT_WIFI_SELECTOR_TABLE_BODY_ROW, scan_results[i].ssid, scan_results[i].rssi, scan_results[i].rssi, scan_results[i].rssi);
-                if (rc4 < 0)
-                {
-                    ESP_LOGI(TAG_HTTP, "Unable to render a Wifi table row");
-                }
-                httpd_resp_send_chunk(req, buffer4, strlen(buffer4));
-                free(buffer4);
-            }
+        RENDER_AND_SEND_CHUNK(req, HTML_FRAGMENT_WIFI_SELECTOR_TABLE_HEADER, *count);
 
-            httpd_resp_send_chunk(req, HTML_FRAGMENT_WIFI_SELECTOR_TABLE_FOOTER, strlen(HTML_FRAGMENT_WIFI_SELECTOR_TABLE_FOOTER));
+        for (int i = 0; i < *count; i++)
+        {
+            RENDER_AND_SEND_CHUNK(req, HTML_FRAGMENT_WIFI_SELECTOR_TABLE_BODY_ROW, scan_results[i].ssid, scan_results[i].rssi, scan_results[i].rssi, scan_results[i].rssi);
         }
-        free(buffer3);
 
+        ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req,
+                                                  HTML_FRAGMENT_WIFI_SELECTOR_TABLE_FOOTER,
+                                                  strlen(HTML_FRAGMENT_WIFI_SELECTOR_TABLE_FOOTER)),
+                            TAG_HTTP,
+                            "Error sending index handler");
         free(scan_results);
         free(count);
     }
@@ -114,7 +65,28 @@ static esp_err_t index_get_handler(httpd_req_t *req)
 static esp_err_t wifi_configure_post_handler(httpd_req_t *req)
 {
     ESP_LOGW(TAG_HTTP, "Method not implemented");
-    // TODO: Implement this next
+    char content[100];
+    int ret = 0;
+    memset(content, 0, sizeof(content));
+    size_t recv_size;
+    if ( req->content_len > sizeof(content)) {
+        recv_size = sizeof(content);
+    } else {
+        recv_size = req->content_len;
+    }
+    ret = httpd_req_recv(req, content, recv_size);
+    if ( ret <= 0) {
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+            httpd_resp_send_408(req);
+        }
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG_HTTP, "Received POST data: %s", content);
+    // Received POST data: wifiindex=-96&wifipassword=testpassword
+    // TODO: validate inputs, and then invoke set_wifi_credentials, send signals to main to switch context
+
+    const char resp[] = "WIFI configuration received";
+    httpd_resp_send(req, resp, strlen(resp));
     return ESP_OK;
 };
 
