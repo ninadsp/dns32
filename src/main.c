@@ -15,7 +15,16 @@ void app_main(void)
     if (is_wifi_stored() == ESP_OK)
     {
         ESP_LOGI(TAG_DNS32, "Found stored wifi");
-        ESP_ERROR_CHECK_WITHOUT_ABORT(setup_station());
+        if (false)
+        {
+            ESP_LOGI(TAG_DNS32, "Attempting to reset wifi");
+            clear_wifi_credentials();
+            ESP_LOGI(TAG_DNS32, "Wifi credentials may have been reset");
+        }
+        else
+        {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(setup_station());
+        }
     }
     else
     {

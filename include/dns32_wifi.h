@@ -38,3 +38,5 @@ esp_err_t log_wifi_scan_to_serial();
 esp_err_t is_wifi_scan_done(bool *status);
 esp_err_t get_wifi_scan_results(uint16_t *count, wifi_ap_record_t *scan_results);
 esp_err_t get_current_ip_address(char *ip_address);
+bool validate_wifi_credentials(char *wifiindex, char *wifipassword);
+esp_err_t store_wifi_credentials(char *wifiindex, char *wifipassword);

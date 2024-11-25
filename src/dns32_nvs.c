@@ -31,6 +31,10 @@ esp_err_t get_wifi_credentials(char *ssid, char *password)
     return ESP_OK;
 };
 
+/*
+    Don't call this directly from the http server, only call this from inside the wifi functions
+    till we figure out better ways to pass along wifi metadata
+*/
 esp_err_t set_wifi_credentials(char *ssid, char *password)
 {
     nvs_handle nvs_wifi_rw;
@@ -42,3 +46,12 @@ esp_err_t set_wifi_credentials(char *ssid, char *password)
     nvs_close(nvs_wifi_rw);
     return ESP_OK;
 };
+
+esp_err_t clear_wifi_credentials() {
+    nvs_handle nvs_wifi_rw;
+    ESP_RETURN_ON_ERROR(nvs_open(DNS32_NVS_WIFI_NS, NVS_READWRITE, &nvs_wifi_rw), TAG_DNS32, "Failed to access NVS for clearing WiFi credentials");
+    ESP_RETURN_ON_ERROR(nvs_erase_all(nvs_wifi_rw), TAG_DNS32, "Cannot erase all wifi information");
+    ESP_ERROR_CHECK(nvs_commit(nvs_wifi_rw));
+    nvs_close(nvs_wifi_rw);
+    return ESP_OK;
+}

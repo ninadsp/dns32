@@ -23,6 +23,28 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             wifi_scan_last_status = DNS32_WIFI_SCAN_COMPLETED;
         }
     }
+    else if (event_id == WIFI_EVENT_STA_CONNECTED)
+    {
+        ESP_LOGI(TAG_STA, "WiFi connected");
+        char current_ip_address_string[IP4ADDR_STRLEN_MAX];
+        get_current_ip_address(current_ip_address_string);
+        ESP_LOGI(TAG_STA, "Current IP address is: %s", current_ip_address_string);
+    }
+    else if (event_id == WIFI_EVENT_STA_START)
+    {
+        wifi_mode_t current_mode;
+        ESP_ERROR_CHECK(esp_wifi_get_mode(&current_mode));
+        if (current_mode == WIFI_MODE_STA)
+        {
+            ESP_LOGI(TAG_STA, "Attempting to connect to stored wifi");
+            ESP_ERROR_CHECK(esp_wifi_connect());
+        }
+    }
+    else if (event_id == IP_EVENT_STA_GOT_IP)
+    {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG_STA, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+    }
 };
 
 esp_err_t initiate_common_wifi()
@@ -40,8 +62,11 @@ esp_err_t setup_station()
     assert(station_ssid != NULL);
     assert(station_password != NULL);
     ESP_ERROR_CHECK_WITHOUT_ABORT(get_wifi_credentials(station_ssid, station_password));
+    ESP_LOGI(TAG_STA, "Got Wifi credentials from storage: ssid: %s, password: %s", station_ssid, station_password);
     // We are pretty sure that this will not fail, as is_wifi_stored has returned successfully
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
 
     wifi_config_t station_config = {
         .ap = {
@@ -120,5 +145,47 @@ esp_err_t get_current_ip_address(char *ip_address)
         return ESP_FAIL;
     }
 
+    return ESP_OK;
+};
+
+bool validate_wifi_credentials(char *wifiindex, char *wifipassword)
+{
+
+    char *endptr = NULL;
+
+    if (strlen(wifipassword) > MAX_PASSPHRASE_LEN)
+    {
+        ESP_LOGE(TAG_AP, "WiFi password is longer than supported");
+        return false;
+    };
+
+    long parsed_index = strtol(wifiindex, endptr, 0);
+    if (endptr == wifiindex)
+    {
+        ESP_LOGE(TAG_AP, "WiFi name validation failed");
+        return false;
+    };
+
+    if (parsed_index > count)
+    {
+        ESP_LOGE(TAG_AP, "WiFi name out of bounds");
+        return false;
+    };
+    // Other wifi validations can go in here
+
+    return true;
+};
+
+/*
+    This assumes that validate_wifi_credentials has been called recently
+    There's still a TOCTOU possibility that results are freed up or changed
+    but we'll fix that later
+*/
+esp_err_t store_wifi_credentials(char *wifiindex, char *wifipassword)
+{
+    char *endptr = NULL;
+    long parsed_index = strtol(wifiindex, endptr, 0);
+    ESP_LOGI(TAG_AP, "Selected wifi name is %s", scan_results[parsed_index].ssid);
+    ESP_RETURN_ON_ERROR(set_wifi_credentials((char *)scan_results[parsed_index].ssid, wifipassword), TAG_AP, "Unable to store wifi credentials");
     return ESP_OK;
 };
