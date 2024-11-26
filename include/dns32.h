@@ -10,6 +10,7 @@
 #include <esp_netif.h>
 #include <esp_netif_net_stack.h>
 #include <esp_check.h>
+#include "mdns.h"
 
 static const char *TAG_DNS32 = "dns32";
 static const char *TAG_AP = "softap";
