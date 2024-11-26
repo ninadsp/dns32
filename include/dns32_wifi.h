@@ -7,6 +7,7 @@
 #define DNS32_WIFI_AP_PASS "savethenetwork"
 #define DNS32_WIFI_AP_MAX_CONN 10
 #define DNS32_WIFI_AP_MAX_APS 15
+#define DNS32_WIFI_STA_MAX_RETRY 5
 
 #define RENDER_AND_SEND_CHUNK(req, format, ...)                                           \
     do                                                                                    \
