@@ -17,16 +17,7 @@ void app_main(void)
     if (is_wifi_stored() == ESP_OK)
     {
         ESP_LOGI(TAG_DNS32, "Found stored wifi");
-        if (false)
-        {
-            ESP_LOGI(TAG_DNS32, "Attempting to reset wifi");
-            clear_wifi_credentials();
-            ESP_LOGI(TAG_DNS32, "Wifi credentials may have been reset");
-        }
-        else
-        {
-            ESP_ERROR_CHECK_WITHOUT_ABORT(setup_station());
-        }
+        ESP_ERROR_CHECK_WITHOUT_ABORT(setup_station());
     }
     else
     {
@@ -35,7 +26,7 @@ void app_main(void)
         ESP_LOGI(TAG_DNS32, "No stored wifi");
         ESP_ERROR_CHECK_WITHOUT_ABORT(setup_softap());
         ESP_ERROR_CHECK_WITHOUT_ABORT(initiate_wifi_scan_async());
-        // Figure out how to start a web server now, and render the list of APs
+        // TODO: Implement a basic DNS server so that mDNS can work?
     }
 
     assert(server == NULL);

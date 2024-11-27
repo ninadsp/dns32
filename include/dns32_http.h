@@ -1,5 +1,20 @@
 #include <esp_http_server.h>
 
+#define RENDER_AND_SEND_CHUNK(req, format, ...)                                           \
+    do                                                                                    \
+    {                                                                                     \
+        char *buffer = NULL;                                                              \
+        int rc = asprintf(&buffer, format, ##__VA_ARGS__);                                \
+        if (rc < 0)                                                                       \
+        {                                                                                 \
+            ESP_LOGI(TAG_HTTP, "Unable to render chunk");                                 \
+            return ESP_FAIL;                                                              \
+        }                                                                                 \
+        esp_err_t chunk_send_status = httpd_resp_send_chunk(req, buffer, strlen(buffer)); \
+        free(buffer);                                                                     \
+        ESP_RETURN_ON_ERROR(chunk_send_status, TAG_HTTP, "Error sending chunk");          \
+    } while (0)
+
 esp_err_t start_webserver(httpd_handle_t *server);
 
 static esp_err_t hello_get_handler(httpd_req_t *req);

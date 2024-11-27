@@ -23,13 +23,15 @@ const char *HTML_FRAGMENT_COMMON_HEADER = "<!DOCTYPE html>\n"
 "    </head>\n"
 "    <body>\n";
 
-const char *HTML_FRAGMENT_WIFI_SELECTOR_HEADER = "    <h1> WiFi Network Selector</h1>\n"
-"    <h2>Current IP Address is: %s</h2>";
+const char *HTML_FRAGMENT_WIFI_STATUS = "    <h1>dns32</h1>\n"
+"    <h4>Current IP Address is: %s</h4>\n"
+"    <h4>Current MAC Address is: %02x:%02x:%02x:%02x:%02x:%02x</h4>";
 
 const char *HTML_FRAGMENT_WIFI_SELECTOR_SCAN_STATUS_FRAGMENT = "    <span>WiFi Scan %s</span>\n";
 
 const char *HTML_FRAGMENT_WIFI_SELECTOR_TABLE_HEADER = "    <h3>Found %d WiFi Networks in range</h3>\n"
 "\n"
+"    <div>Please select your home network:</div>\n"
 "    <form method='post' action='/wifi-configure'>\n"
 "    <table>\n"
 "      <thead>\n"

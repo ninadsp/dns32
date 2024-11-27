@@ -9,21 +9,6 @@
 #define DNS32_WIFI_AP_MAX_APS 15
 #define DNS32_WIFI_STA_MAX_RETRY 5
 
-#define RENDER_AND_SEND_CHUNK(req, format, ...)                                           \
-    do                                                                                    \
-    {                                                                                     \
-        char *buffer = NULL;                                                              \
-        int rc = asprintf(&buffer, format, ##__VA_ARGS__);                                \
-        if (rc < 0)                                                                       \
-        {                                                                                 \
-            ESP_LOGI(TAG_HTTP, "Unable to render chunk");                                 \
-            return ESP_FAIL;                                                              \
-        }                                                                                 \
-        esp_err_t chunk_send_status = httpd_resp_send_chunk(req, buffer, strlen(buffer)); \
-        free(buffer);                                                                     \
-        ESP_RETURN_ON_ERROR(chunk_send_status, TAG_HTTP, "Error sending chunk");          \
-    } while (0)
-
 typedef enum {
     DNS32_WIFI_SCAN_STARTED,
     DNS32_WIFI_SCAN_FAILED,

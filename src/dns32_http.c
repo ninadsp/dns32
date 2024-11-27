@@ -24,11 +24,18 @@ static esp_err_t index_get_handler(httpd_req_t *req)
                         TAG_HTTP,
                         "Error sending index handler");
 
-    get_current_ip_address(current_ip_address_string);
-    RENDER_AND_SEND_CHUNK(req, HTML_FRAGMENT_WIFI_SELECTOR_HEADER, current_ip_address_string);
     is_wifi_scan_done(&wifi_scan_status);
     wifi_mode_t current_mode;
+    uint8_t wifi_mac[6];
     ESP_ERROR_CHECK(esp_wifi_get_mode(&current_mode));
+
+    ESP_ERROR_CHECK(esp_wifi_get_mac(current_mode == WIFI_MODE_APSTA ? WIFI_MODE_AP : current_mode, wifi_mac));
+    get_current_ip_address(current_ip_address_string);
+    RENDER_AND_SEND_CHUNK(
+        req, HTML_FRAGMENT_WIFI_STATUS,
+         current_ip_address_string,
+         wifi_mac[0], wifi_mac[1], wifi_mac[2], wifi_mac[3], wifi_mac[4], wifi_mac[5]);
+
     if (current_mode == WIFI_MODE_AP)
     {
         RENDER_AND_SEND_CHUNK(req, HTML_FRAGMENT_WIFI_SELECTOR_SCAN_STATUS_FRAGMENT, wifi_scan_status ? WIFI_STATUS_COMPLETE : WIFI_STATUS_IN_PROGRESS);
@@ -55,6 +62,10 @@ static esp_err_t index_get_handler(httpd_req_t *req)
                             "Error sending index handler");
         free(scan_results);
         free(count);
+    } else {
+        wifi_ap_record_t current_ap_info;
+        ESP_ERROR_CHECK(esp_wifi_sta_get_ap_info(&current_ap_info));
+        RENDER_AND_SEND_CHUNK(req, HTML_FRAGMENT_STATUS_PAGE, current_ap_info.ssid );
     }
 
     ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req,
