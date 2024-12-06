@@ -63,13 +63,6 @@ static void dns_server_task(void *pvParameters)
         }
         ESP_LOGI(TAG_DNS32, "UDP Socket created");
 
-        /*
-        struct timeval timeout;
-        timeout.tv_sec = 10;
-        timeout.tv_usec = 0;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
-        */
-
         int err = bind(sock, &dest_addr, sizeof(dest_addr));
         if (err < 0)
         {
@@ -100,7 +93,6 @@ static void dns_server_task(void *pvParameters)
             ESP_LOGI(TAG_DNS32, "waiting for data");
 
             int len = recvmsg(sock, &msg, 0);
-            // int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 1, 0, (struct sockaddr *)&source_addr, &socklen);
             if (len < 0)
             {
                 ESP_LOGE(TAG_DNS32, "recvfrom failed: errno %s", strerror(errno));
@@ -123,6 +115,11 @@ static void dns_server_task(void *pvParameters)
                 rx_buffer[len] = 0;
                 ESP_LOGI(TAG_DNS32, "Received %d bytes from %s: ", len, addr_str);
                 ESP_LOGI(TAG_DNS32, "%s", rx_buffer);
+
+                // TODO: add recursive querying behaviour for when in station mode.
+                // we _should_ be able to keep most of the scaffolding the same, and only handle the ip address
+                // part differently. then, figure out how to do it with a deny list
+                // then do refactoring, and then file handling plus loading to memory
 
                 // if is_station_mode is false, we need to respond with the device's IP address
                 // irrespective of what the domain name requested is
@@ -161,7 +158,7 @@ static void dns_server_task(void *pvParameters)
                         https://en.wikipedia.org/wiki/Domain_Name_System#Question_section
                         > The domain name is broken into discrete labels which are concatenated; each label is prefixed by the length of that label
 
-                        So, a request for `google.com` is packed into the data structure as [6]google[3]com,
+                        So, a request for `google.com` is packed into the data structure as [6]google[3]com[0],
                         with each label getting it's own space, preceeded by a byte that stores the length of that label string
                         And, name_end_ptr then points to the address of 'google' in the above example, which is
                         essentially the start of the question
@@ -240,12 +237,20 @@ void app_main(void)
 {
     httpd_handle_t *http_server = NULL;
     bool is_station_mode;
+
+    esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
+    esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
+    esp_log_level_set("httpd_parse", ESP_LOG_ERROR);
+    esp_log_level_set("wifi", ESP_LOG_ERROR);
+    esp_log_level_set("esp_netif_lwip", ESP_LOG_ERROR);
+
     ESP_ERROR_CHECK(esp_netif_init());
     // Need to handle ESP_ERR_NVS_NO_FREE_PAGES and ESP_ERR_NVS_NEW_VERSION_FOUND
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(initiate_common_wifi());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(mdns_init());
+    // At some point of time, figure out how to respond to multiple names on mdns
     ESP_ERROR_CHECK(mdns_hostname_set("dns32"));
 
     if (is_wifi_stored() == ESP_OK)
