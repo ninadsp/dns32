@@ -14,6 +14,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         uint16_t number = DNS32_WIFI_AP_MAX_APS;
 
         ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&scan_results_count));
+        // TODO: number will change value if we have more than max_aps, and then we run into heap corruption
+        // in get_wifi_scan_results, that we need to fix/account for
         ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, &scan_results));
         if (scan_results_count == 0)
         {

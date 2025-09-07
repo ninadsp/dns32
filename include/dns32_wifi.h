@@ -6,7 +6,7 @@
 #define DNS32_WIFI_AP_SSID "dns32"
 #define DNS32_WIFI_AP_PASS "savethenetwork"
 #define DNS32_WIFI_AP_MAX_CONN 10
-#define DNS32_WIFI_AP_MAX_APS 15
+#define DNS32_WIFI_AP_MAX_APS 30
 #define DNS32_WIFI_STA_MAX_RETRY 5
 
 typedef enum {
