@@ -45,6 +45,17 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG_STA, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+
+        esp_netif_dns_info_t dns_info;
+        esp_netif_t *netif = event->esp_netif;
+
+        for (int i = 0; i < ESP_NETIF_DNS_MAX; ++i)
+        {
+            if (esp_netif_get_dns_info(netif, i, &dns_info) == ESP_OK)
+            {
+                ESP_LOGI(TAG_STA, "DNS%d: " IPSTR, i, IP2STR(&dns_info.ip.u_addr.ip4));
+            }
+        }
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {

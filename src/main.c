@@ -37,6 +37,27 @@ static char *parse_dns_name(char *raw_name, char *parsed_name, size_t parsed_nam
     return label + 1;
 }
 
+static esp_err_t get_upstream_dns_servers(upstream_dns_servers_t *dns_servers)
+{
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    
+    dns_servers->count = 0;
+    esp_netif_dns_info_t dns_info;
+
+    for (int i = ESP_NETIF_DNS_MAIN; i < ESP_NETIF_DNS_MAX && dns_servers->count < MAX_DNS_SERVERS; i++) {
+        esp_err_t ret = esp_netif_get_dns_info(netif, i, &dns_info);
+        if (ret == ESP_OK && dns_info.ip.u_addr.ip4.addr != 0) {
+            dns_servers->servers[dns_servers->count] = dns_info.ip.u_addr.ip4;
+            ESP_LOGI(TAG_DNS32, "Found DNS server %d: " IPSTR, 
+                     dns_servers->count, IP2STR(&dns_info.ip.u_addr.ip4));
+            dns_servers->count++;
+        }
+    }
+
+    ESP_LOGI(TAG_DNS32, "Discovered %d upstream DNS servers", dns_servers->count);
+    return ESP_OK;
+}
+
 static void dns_server_task(void *pvParameters)
 {
     char rx_buffer[128];
@@ -44,8 +65,17 @@ static void dns_server_task(void *pvParameters)
     const int addr_family = AF_INET;
     const int ip_protocol = IPPROTO_IP;
     bool is_station_mode = (bool)pvParameters;
+    upstream_dns_servers_t upstream_dns = {0};
 
     ESP_LOGI(TAG_DNS32, "bool is_station_mode: %s", is_station_mode ? "true" : "false");
+
+    if (is_station_mode) {
+        ESP_LOGI(TAG_DNS32, "Querying for upstream DNS servers...");
+        esp_err_t ret = get_upstream_dns_servers(&upstream_dns);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG_DNS32, "Failed to get upstream DNS servers");
+        }
+    }
 
     struct sockaddr_in dest_addr;
 

@@ -27,6 +27,13 @@ static const char *TAG_HTTP = "http";
 #define QR_FLAG (1 << 7)
 #define QD_TYPE_A (0x0001)
 #define ANS_TTL_SEC (300)
+#define MAX_DNS_SERVERS (3)
+
+// Storage for upstream DNS servers
+typedef struct {
+    esp_ip4_addr_t servers[MAX_DNS_SERVERS];
+    int count;
+} upstream_dns_servers_t;
 
 // DNS Header Packet
 typedef struct __attribute__((__packed__))
