@@ -4,6 +4,20 @@
 static upstream_dns_servers_t g_upstream_dns = {0};
 static SemaphoreHandle_t dns_update_semaphore = NULL;
 
+// DNS Query Handler Registry
+#define MAX_DNS_HANDLERS 16
+static dns_query_type_handler_t dns_handlers[MAX_DNS_HANDLERS];
+static int dns_handler_count = 0;
+
+// DNS server configuration
+static dns_server_config_t g_dns_config = {
+    .enable_reverse_dns = true,
+    .enable_device_info_txt = true,
+    .forward_unknown_types = true,
+    .local_domain = "dns32.local",
+    .device_ip = {.addr = ESP_IP4TOADDR(192, 168, 4, 1)}
+};
+
 /*
     Parse the name from the packet from the DNS name format to a regular .-seperated name
     returns the pointer to the next part of the packet
@@ -64,6 +78,294 @@ void update_global_upstream_dns_servers(esp_netif_t *netif)
     }
 }
 
+// DNS Handler Registry Functions
+esp_err_t dns_handler_register(uint16_t query_type, dns_query_handler_t handler, const char *type_name)
+{
+    if (dns_handler_count >= MAX_DNS_HANDLERS) {
+        ESP_LOGE(TAG_DNS32, "Maximum DNS handlers reached");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Check for duplicate registration
+    for (int i = 0; i < dns_handler_count; i++) {
+        if (dns_handlers[i].query_type == query_type) {
+            ESP_LOGW(TAG_DNS32, "DNS handler for type 0x%04X already registered, replacing", query_type);
+            dns_handlers[i].handler = handler;
+            dns_handlers[i].type_name = type_name;
+            return ESP_OK;
+        }
+    }
+
+    dns_handlers[dns_handler_count].query_type = query_type;
+    dns_handlers[dns_handler_count].handler = handler;
+    dns_handlers[dns_handler_count].type_name = type_name;
+    dns_handler_count++;
+
+    ESP_LOGI(TAG_DNS32, "Registered DNS handler for type 0x%04X (%s)", query_type, type_name);
+    return ESP_OK;
+}
+
+dns_query_handler_t dns_handler_get(uint16_t query_type)
+{
+    for (int i = 0; i < dns_handler_count; i++) {
+        if (dns_handlers[i].query_type == query_type) {
+            return dns_handlers[i].handler;
+        }
+    }
+    return NULL;
+}
+
+const char* dns_query_type_name(uint16_t query_type)
+{
+    for (int i = 0; i < dns_handler_count; i++) {
+        if (dns_handlers[i].query_type == query_type) {
+            return dns_handlers[i].type_name;
+        }
+    }
+    
+    // Return default names for known types not yet registered
+    switch (query_type) {
+        case QD_TYPE_A: return "A";
+        case QD_TYPE_NS: return "NS";
+        case QD_TYPE_CNAME: return "CNAME";
+        case QD_TYPE_SOA: return "SOA";
+        case QD_TYPE_PTR: return "PTR";
+        case QD_TYPE_MX: return "MX";
+        case QD_TYPE_TXT: return "TXT";
+        case QD_TYPE_SRV: return "SRV";
+        default: return "UNKNOWN";
+    }
+}
+
+// Build a simple DNS response for A record in AP mode
+static int build_simple_a_response(char *query_buffer, int query_len, char *response_buffer, const char *name, uint32_t ip_addr)
+{
+    // Copy the original query
+    memcpy(response_buffer, query_buffer, query_len);
+    
+    dns_header_t *header = (dns_header_t *)response_buffer;
+    
+    // Set response flags
+    header->flags |= htons(QR_FLAG);  // Set QR flag for response
+    header->an_count = htons(1);      // One answer
+    header->ar_count = htons(0);      // No additional records
+    
+    // The answer goes right after the question section
+    char *answer_ptr = response_buffer + query_len;
+    dns_answer_t *answer = (dns_answer_t *)answer_ptr;
+    
+    // Find where the question starts (after header)
+    char *question_ptr = response_buffer + sizeof(dns_header_t);
+    
+    // Set up the answer with name compression (point back to question name)
+    answer->ptr_offset = htons(0xC000 | (question_ptr - response_buffer));
+    answer->type = htons(QD_TYPE_A);
+    answer->class = htons(1);  // IN class
+    answer->ttl = htonl(ANS_TTL_SEC);
+    answer->addr_len = htons(4);  // IPv4 address length
+    answer->ip_addr = ip_addr;
+    
+    int response_len = query_len + sizeof(dns_answer_t);
+    
+    ESP_LOGI(TAG_DNS32, "Built A record response: %d bytes, IP=0x%08lx", response_len, (unsigned long)ntohl(ip_addr));
+    return response_len;
+}
+
+// Forward query to upstream DNS and return response
+static int forward_to_upstream_dns(char *query_buffer, int query_len, char *response_buffer, 
+                                  upstream_dns_servers_t *upstream_dns, const char *domain_name)
+{
+    if (!upstream_dns || upstream_dns->count == 0) {
+        ESP_LOGW(TAG_DNS32, "No upstream DNS servers available");
+        return 0;
+    }
+    
+    // Create socket for upstream DNS query
+    int upstream_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (upstream_sock < 0) {
+        ESP_LOGE(TAG_DNS32, "Unable to create socket for upstream DNS query");
+        return 0;
+    }
+    
+    // Set up upstream DNS server address (use first server)
+    struct sockaddr_in upstream_addr;
+    upstream_addr.sin_family = AF_INET;
+    upstream_addr.sin_port = htons(53);
+    upstream_addr.sin_addr.s_addr = upstream_dns->servers[0].addr;
+
+    char upstream_ip_str[16];
+    inet_ntoa_r(upstream_dns->servers[0], upstream_ip_str, sizeof(upstream_ip_str));
+    ESP_LOGI(TAG_DNS32, "Forwarding DNS query for %s to upstream server %s", domain_name, upstream_ip_str);
+
+    // Forward the query to upstream DNS
+    int send_result = sendto(upstream_sock, query_buffer, query_len, 0, 
+                           (struct sockaddr *)&upstream_addr, sizeof(upstream_addr));
+    if (send_result < 0) {
+        ESP_LOGE(TAG_DNS32, "Failed to send query to upstream DNS: errno %s", strerror(errno));
+        close(upstream_sock);
+        return 0;
+    }
+
+    // Set receive timeout
+    struct timeval timeout;
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0;
+    setsockopt(upstream_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    // Receive response from upstream DNS
+    struct sockaddr_in upstream_response_addr;
+    socklen_t upstream_response_len = sizeof(upstream_response_addr);
+    
+    int recv_len = recvfrom(upstream_sock, response_buffer, DNS_MAX_LEN, 0,
+                          (struct sockaddr *)&upstream_response_addr, &upstream_response_len);
+    
+    close(upstream_sock);
+    
+    if (recv_len > 0) {
+        ESP_LOGI(TAG_DNS32, "Received %d bytes from upstream DNS server %s", recv_len, upstream_ip_str);
+        
+        // Parse and log the response
+        dns_header_t *response_header = (dns_header_t *)response_buffer;
+        ESP_LOGI(TAG_DNS32, "Upstream response: id=0x%X, flags=0x%X, answers=%d", 
+                ntohs(response_header->id), ntohs(response_header->flags), ntohs(response_header->an_count));
+        
+        return recv_len;
+    } else {
+        ESP_LOGE(TAG_DNS32, "Failed to receive response from upstream DNS: errno %s", strerror(errno));
+        return 0;
+    }
+}
+
+// A Record Handler - Handles IPv4 address queries
+static esp_err_t handle_a_query(
+    dns_query_context_t *ctx,
+    const char *name,
+    uint16_t qtype, 
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer,
+    int *response_len
+)
+{
+    ESP_LOGI(TAG_DNS32, "Handling A query for %s", name);
+    
+    if (!ctx->is_station_mode) {
+        // AP mode: Return device IP
+        esp_ip4_addr_t ip = ctx->device_ip;
+        
+        ESP_LOGI(TAG_DNS32, "AP mode: Responding with device IP " IPSTR, IP2STR(&ip));
+        
+        // Build actual DNS response
+        *response_len = build_simple_a_response(query_buffer, query_len, response_buffer, name, ip.addr);
+        
+        if (*response_len > 0) {
+            return ESP_OK;
+        } else {
+            ESP_LOGE(TAG_DNS32, "Failed to build A record response for AP mode");
+            return ESP_FAIL;
+        }
+        
+    } else {
+        // Station mode: Forward to upstream DNS
+        if (ctx->upstream_dns && ctx->upstream_dns->count > 0) {
+            ESP_LOGI(TAG_DNS32, "Station mode: Forwarding A query for %s to upstream DNS", name);
+            
+            // Forward query and get response
+            *response_len = forward_to_upstream_dns(query_buffer, query_len, response_buffer, 
+                                                   ctx->upstream_dns, name);
+            
+            if (*response_len > 0) {
+                ESP_LOGI(TAG_DNS32, "Successfully forwarded A query for %s, got %d bytes", name, *response_len);
+                return ESP_OK;
+            } else {
+                ESP_LOGE(TAG_DNS32, "Failed to get response from upstream DNS for %s", name);
+                return ESP_FAIL;
+            }
+        } else {
+            ESP_LOGW(TAG_DNS32, "No upstream DNS servers available for A query");
+            return ESP_FAIL;
+        }
+    }
+}
+
+// Default handler for unsupported query types
+static esp_err_t handle_unsupported_query(
+    dns_query_context_t *ctx,
+    const char *name,
+    uint16_t qtype, 
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer,
+    int *response_len
+)
+{
+    const char *type_name = dns_query_type_name(qtype);
+    ESP_LOGI(TAG_DNS32, "Handling unsupported query type %s (0x%04X) for %s", type_name, qtype, name);
+    
+    if (ctx->is_station_mode && g_dns_config.forward_unknown_types) {
+        ESP_LOGI(TAG_DNS32, "Station mode: Forwarding unsupported query type %s", type_name);
+        // Forward to upstream DNS
+        *response_len = forward_to_upstream_dns(query_buffer, query_len, response_buffer, 
+                                               ctx->upstream_dns, name);
+        if (*response_len > 0) {
+            ESP_LOGI(TAG_DNS32, "Successfully forwarded %s query, got %d bytes", type_name, *response_len);
+            return ESP_OK;
+        } else {
+            ESP_LOGE(TAG_DNS32, "Failed to forward %s query", type_name);
+            return ESP_FAIL;
+        }
+    } else {
+        ESP_LOGI(TAG_DNS32, "AP mode: Not supporting query type %s", type_name);
+        // TODO: Return proper NXDOMAIN response
+        *response_len = 0;
+        return ESP_FAIL;
+    }
+}
+
+// Main DNS Query Handler
+esp_err_t handle_dns_query(
+    const char *name, 
+    uint16_t qtype, 
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer, 
+    int *response_len,
+    dns_query_context_t *ctx
+)
+{
+    const char *type_name = dns_query_type_name(qtype);
+    ESP_LOGI(TAG_DNS32, "Processing DNS query: name=%s, type=%s (0x%04X), class=%d", 
+             name, type_name, qtype, qclass);
+    
+    // Look up handler for this query type
+    dns_query_handler_t handler = dns_handler_get(qtype);
+    
+    if (handler != NULL) {
+        // Use registered handler
+        ESP_LOGD(TAG_DNS32, "Using registered handler for query type %s", type_name);
+        return handler(ctx, name, qtype, qclass, query_buffer, query_len, response_buffer, response_len);
+    } else {
+        // Use default unsupported handler
+        ESP_LOGD(TAG_DNS32, "No registered handler for query type %s, using default", type_name);
+        return handle_unsupported_query(ctx, name, qtype, qclass, query_buffer, query_len, response_buffer, response_len);
+    }
+}
+
+// Initialize DNS handlers
+static esp_err_t init_dns_handlers(void)
+{
+    ESP_LOGI(TAG_DNS32, "Initializing DNS query handlers");
+    
+    // Register A record handler
+    ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_A, handle_a_query, "A"));
+    
+    ESP_LOGI(TAG_DNS32, "DNS handlers initialized, %d handlers registered", dns_handler_count);
+    return ESP_OK;
+}
+
 static void dns_server_task(void *pvParameters)
 {
     char rx_buffer[128];
@@ -90,7 +392,7 @@ static void dns_server_task(void *pvParameters)
         }
         ESP_LOGI(TAG_DNS32, "UDP Socket created");
 
-        int err = bind(sock, &dest_addr, sizeof(dest_addr));
+        int err = bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
         if (err < 0)
         {
             ESP_LOGE(TAG_DNS32, "Unable to bind UDP socket for DNS server: errno %s", strerror(errno));
@@ -143,213 +445,76 @@ static void dns_server_task(void *pvParameters)
                 ESP_LOGI(TAG_DNS32, "Received %d bytes from %s: ", len, addr_str);
                 ESP_LOGI(TAG_DNS32, "%s", rx_buffer);
 
-                // TODO: add recursive querying behaviour for when in station mode.
-                // we _should_ be able to keep most of the scaffolding the same, and only handle the ip address
-                // part differently. then, figure out how to do it with a deny list
-                // then do refactoring, and then file handling plus loading to memory
+                // Process DNS query using the new handler framework
+                dns_header_t *header = (dns_header_t *)rx_buffer;
+                ESP_LOGI(TAG_DNS32, "Received DNS query with header id: 0x%X, flags 0x%X, qd_count: %d",
+                         ntohs(header->id), ntohs(header->flags), ntohs(header->qd_count));
 
-                // if is_station_mode is false, we need to respond with the device's IP address
-                // irrespective of what the domain name requested is
-                if (!is_station_mode)
-                {
-                    char reply[DNS_MAX_LEN];
-                    memset(reply, 0, DNS_MAX_LEN);
-                    memcpy(reply, rx_buffer, (len - 1));
-
-                    dns_header_t *header = (dns_header_t *)reply;
-                    ESP_LOGI(TAG_DNS32, "Received DNS query with header id: 0x%X, flags 0x%X, qd_count: %d",
-                             ntohs(header->id), ntohs(header->flags), ntohs(header->qd_count));
-
-                    header->flags |= QR_FLAG;
-
-                    uint16_t qd_count = ntohs(header->qd_count);
-                    header->an_count = htons(qd_count);
-
-                    int reply_len = qd_count * sizeof(dns_answer_t) + len;
-                    if (reply_len > DNS_MAX_LEN)
-                    {
-                        ESP_LOGE(TAG_DNS32, "Longer reply than supported");
-                        break;
-                    }
-
-                    char *cur_ans_ptr = reply + len;
-                    char *cur_qd_ptr = reply + sizeof(dns_header_t);
-
-                    // technically,we don't need to parse this, we can just copy from incoming buffer
-                    // but for now, let us follow the example code
-                    char name[128];
-
-                    for (int qd_i = 0; qd_i < qd_count; qd_i++)
-                    {
-                        /*
-                        https://en.wikipedia.org/wiki/Domain_Name_System#Question_section
-                        > The domain name is broken into discrete labels which are concatenated; each label is prefixed by the length of that label
-
-                        So, a request for `google.com` is packed into the data structure as [6]google[3]com[0],
-                        with each label getting it's own space, preceeded by a byte that stores the length of that label string
-                        And, name_end_ptr then points to the address of 'google' in the above example, which is
-                        essentially the start of the question
-                        */
-                        char *name_end_ptr = parse_dns_name(cur_qd_ptr, name, sizeof(name));
-                        if (name_end_ptr == NULL)
-                        {
-                            ESP_LOGE(TAG_DNS32, "Failed parsing the requested DNS name: %s", cur_qd_ptr);
-                            break;
-                        }
-
-                        dns_question_t *question = (dns_question_t *)(name_end_ptr);
-                        uint16_t qd_type = ntohs(question->type);
-                        uint16_t qd_class = ntohs(question->class);
-
-                        ESP_LOGI(TAG_DNS32, "Received a query type: %d, class: %d, question for: %s", qd_type, qd_class, name);
-
-                        esp_ip4_addr_t ip = {.addr = IP_ADDR_ANY};
-                        if (qd_type == QD_TYPE_A)
-                        {
-                            cur_ans_ptr = name_end_ptr + sizeof(dns_question_t);
-                            ip.addr = ESP_IP4TOADDR(192, 168, 4, 1);
-                        }
-
-                        // set up the answer, so that we can then send it via the socket
-                        dns_answer_t *answer = (dns_answer_t *)cur_ans_ptr;
-                        answer->ptr_offset = htons(0xC000 | (cur_qd_ptr - reply));
-                        answer->type = htons(qd_type);
-                        answer->class = htons(qd_class);
-                        answer->ttl = htonl(ANS_TTL_SEC);
-
-                        ESP_LOGI(TAG_DNS32, "Answer with PTR offset: 0x%" PRIX16 " and IP 0x%" PRIX32,
-                                 ntohs(answer->ptr_offset), ip.addr);
-
-                        answer->addr_len = htons(sizeof(ip.addr));
-                        answer->ip_addr = ip.addr;
-
-                        header->an_count = htons(1);
-                        header->ar_count = htons(0);
-                    }
-
-                    ESP_LOGI(TAG_DNS32, "Received %d bytes from %s | DNS reply with len: %d ", len, addr_str, reply_len);
-
-                    int err = sendto(sock, reply, reply_len, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
-                    if (err < 0)
-                    {
-                        ESP_LOGE(TAG_DNS32, "Could not send back DNS request response: errno %s", strerror(errno));
-                        break;
-                    }
+                uint16_t qd_count = ntohs(header->qd_count);
+                if (qd_count == 0) {
+                    ESP_LOGW(TAG_DNS32, "Received DNS query with no questions");
+                    continue;
                 }
-                else
-                {
-                    // Station mode: implement recursive DNS querying
-                    // Use global upstream DNS servers (updated by wifi event handler)
-                    upstream_dns_servers_t current_upstream_dns = {0};
-                    if (dns_update_semaphore != NULL && xSemaphoreTake(dns_update_semaphore, pdMS_TO_TICKS(100)) == pdTRUE) {
-                        current_upstream_dns = g_upstream_dns;
-                        xSemaphoreGive(dns_update_semaphore);
-                    }
-                    
-                    if (current_upstream_dns.count > 0) {
-                        // Parse the incoming DNS query
-                        dns_header_t *header = (dns_header_t *)rx_buffer;
-                        ESP_LOGI(TAG_DNS32, "Received DNS query with header id: 0x%X, flags 0x%X, qd_count: %d",
-                                 ntohs(header->id), ntohs(header->flags), ntohs(header->qd_count));
 
-                        uint16_t qd_count = ntohs(header->qd_count);
-                        char *cur_qd_ptr = rx_buffer + sizeof(dns_header_t);
-                        char name[128];
-                        bool should_forward = false;
+                // Set up query context
+                upstream_dns_servers_t current_upstream_dns = {0};
+                if (dns_update_semaphore != NULL && xSemaphoreTake(dns_update_semaphore, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    current_upstream_dns = g_upstream_dns;
+                    xSemaphoreGive(dns_update_semaphore);
+                }
 
-                        // Check if this is an A query that we should forward
-                        for (int qd_i = 0; qd_i < qd_count; qd_i++) {
-                            char *name_end_ptr = parse_dns_name(cur_qd_ptr, name, sizeof(name));
-                            if (name_end_ptr == NULL) {
-                                ESP_LOGE(TAG_DNS32, "Failed parsing the requested DNS name");
-                                break;
-                            }
+                dns_query_context_t ctx = {
+                    .is_station_mode = is_station_mode,
+                    .upstream_dns = &current_upstream_dns,
+                    .device_ip = g_dns_config.device_ip,
+                    .local_domain = g_dns_config.local_domain
+                };
 
-                            dns_question_t *question = (dns_question_t *)(name_end_ptr);
-                            uint16_t qd_type = ntohs(question->type);
-                            uint16_t qd_class = ntohs(question->class);
+                // Parse and process each question (for now, handle only the first one)
+                char *cur_qd_ptr = rx_buffer + sizeof(dns_header_t);
+                char name[128];
+                char *name_end_ptr = parse_dns_name(cur_qd_ptr, name, sizeof(name));
+                if (name_end_ptr == NULL) {
+                    ESP_LOGE(TAG_DNS32, "Failed parsing the requested DNS name");
+                    continue;
+                }
 
-                            ESP_LOGI(TAG_DNS32, "Query type: %d, class: %d, question for: %s", qd_type, qd_class, name);
+                dns_question_t *question = (dns_question_t *)(name_end_ptr);
+                uint16_t qd_type = ntohs(question->type);
+                uint16_t qd_class = ntohs(question->class);
 
-                            if (qd_type == QD_TYPE_A) {
-                                should_forward = true;
-                                break;
-                            }
-                        }
+                const char *type_name = dns_query_type_name(qd_type);
+                ESP_LOGI(TAG_DNS32, "Processing query: name=%s, type=%s (0x%04X), class=%d", 
+                         name, type_name, qd_type, qd_class);
 
-                        if (should_forward) {
-                            // Create socket for upstream DNS query
-                            int upstream_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-                            if (upstream_sock < 0) {
-                                ESP_LOGE(TAG_DNS32, "Unable to create socket for upstream DNS query");
-                            } else {
-                                // Set up upstream DNS server address (use first server)
-                                struct sockaddr_in upstream_addr;
-                                upstream_addr.sin_family = AF_INET;
-                                upstream_addr.sin_port = htons(53);
-                                upstream_addr.sin_addr.s_addr = current_upstream_dns.servers[0].addr;
-
-                                char upstream_ip_str[16];
-                                inet_ntoa_r(current_upstream_dns.servers[0], upstream_ip_str, sizeof(upstream_ip_str));
-                                ESP_LOGI(TAG_DNS32, "Forwarding DNS query for %s to upstream server %s", name, upstream_ip_str);
-
-                                // Forward the query to upstream DNS
-                                int send_result = sendto(upstream_sock, rx_buffer, len, 0, 
-                                                       (struct sockaddr *)&upstream_addr, sizeof(upstream_addr));
-                                if (send_result < 0) {
-                                    ESP_LOGE(TAG_DNS32, "Failed to send query to upstream DNS: errno %s", strerror(errno));
-                                } else {
-                                    // Set receive timeout
-                                    struct timeval timeout;
-                                    timeout.tv_sec = 5;
-                                    timeout.tv_usec = 0;
-                                    setsockopt(upstream_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-
-                                    // Receive response from upstream DNS
-                                    char upstream_response[DNS_MAX_LEN];
-                                    struct sockaddr_in upstream_response_addr;
-                                    socklen_t upstream_response_len = sizeof(upstream_response_addr);
-                                    
-                                    int recv_len = recvfrom(upstream_sock, upstream_response, sizeof(upstream_response), 0,
-                                                          (struct sockaddr *)&upstream_response_addr, &upstream_response_len);
-                                    
-                                    if (recv_len > 0) {
-                                        ESP_LOGI(TAG_DNS32, "Received %d bytes from upstream DNS server %s", recv_len, upstream_ip_str);
-                                        
-                                        // Parse and log the response
-                                        dns_header_t *response_header = (dns_header_t *)upstream_response;
-                                        ESP_LOGI(TAG_DNS32, "Upstream response: id=0x%X, flags=0x%X, answers=%d", 
-                                                ntohs(response_header->id), ntohs(response_header->flags), ntohs(response_header->an_count));
-                                        
-                                        // Forward the response back to client
-                                        int forward_result = sendto(sock, upstream_response, recv_len, 0, 
-                                                                  (struct sockaddr *)&source_addr, sizeof(source_addr));
-                                        if (forward_result < 0) {
-                                            ESP_LOGE(TAG_DNS32, "Failed to forward response to client: errno %s", strerror(errno));
-                                        } else {
-                                            ESP_LOGI(TAG_DNS32, "Successfully forwarded DNS response to client %s", addr_str);
-                                        }
-                                    } else {
-                                        ESP_LOGE(TAG_DNS32, "Failed to receive response from upstream DNS: errno %s", strerror(errno));
-                                    }
-                                }
-                                close(upstream_sock);
-                            }
-                        } else {
-                            // Not an A query, send back the original query as-is
-                            int err = sendto(sock, rx_buffer, len, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
-                            if (err < 0) {
-                                ESP_LOGE(TAG_DNS32, "Could not send back UDP response: errno %s", strerror(errno));
-                                break;
-                            }
-                        }
+                // Use new framework to handle query
+                char response_buffer[DNS_MAX_LEN];
+                int response_len = 0;
+                
+                esp_err_t result = handle_dns_query(name, qd_type, qd_class, rx_buffer, len, response_buffer, &response_len, &ctx);
+                
+                if (result == ESP_OK && response_len > 0) {
+                    // Send the response
+                    int err = sendto(sock, response_buffer, response_len, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
+                    if (err < 0) {
+                        ESP_LOGE(TAG_DNS32, "Could not send DNS response: errno %s", strerror(errno));
                     } else {
-                        ESP_LOGI(TAG_DNS32, "No upstream DNS servers available, echoing query");
-                        int err = sendto(sock, rx_buffer, len, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
-                        if (err < 0) {
-                            ESP_LOGE(TAG_DNS32, "Could not send back UDP response: errno %s", strerror(errno));
-                            break;
-                        }
+                        ESP_LOGI(TAG_DNS32, "Sent DNS response: %d bytes to %s", response_len, addr_str);
+                    }
+                } else {
+                    ESP_LOGW(TAG_DNS32, "Failed to generate DNS response for %s query", type_name);
+                }
+
+                // For backward compatibility during transition, fall back to old logic if new framework didn't generate response
+                if (response_len == 0) {
+                    ESP_LOGW(TAG_DNS32, "New framework didn't generate response, using simple fallback");
+                    
+                    // TODO: Implement proper response generation in handlers
+                    // For now, just echo the query back (minimal fallback)
+                    ESP_LOGI(TAG_DNS32, "Falling back to echo response");
+                    int err = sendto(sock, rx_buffer, len, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
+                    if (err < 0) {
+                        ESP_LOGE(TAG_DNS32, "Could not send fallback response: errno %s", strerror(errno));
                     }
                 }
 
@@ -375,7 +540,10 @@ esp_err_t dns_server_init(void)
         return ESP_FAIL;
     }
     
-    ESP_LOGI(TAG_DNS32, "DNS server initialized");
+    // Initialize DNS query handlers
+    ESP_ERROR_CHECK(init_dns_handlers());
+    
+    ESP_LOGI(TAG_DNS32, "DNS server initialized with %d handlers", dns_handler_count);
     return ESP_OK;
 }
 
