@@ -137,8 +137,10 @@ const char* dns_query_type_name(uint16_t query_type)
     }
 }
 
-// Build a simple DNS response for A record in AP mode
-static int build_simple_a_response(char *query_buffer, int query_len, char *response_buffer, const char *name, uint32_t ip_addr)
+// Generic function to build DNS response with variable-length data
+static int build_dns_response_generic(char *query_buffer, int query_len, char *response_buffer, 
+                                    const char *name, uint16_t record_type, void *record_data, 
+                                    uint16_t data_len, uint32_t ttl)
 {
     // Copy the original query
     memcpy(response_buffer, query_buffer, query_len);
@@ -152,23 +154,78 @@ static int build_simple_a_response(char *query_buffer, int query_len, char *resp
     
     // The answer goes right after the question section
     char *answer_ptr = response_buffer + query_len;
-    dns_answer_t *answer = (dns_answer_t *)answer_ptr;
     
     // Find where the question starts (after header)
     char *question_ptr = response_buffer + sizeof(dns_header_t);
     
     // Set up the answer with name compression (point back to question name)
-    answer->ptr_offset = htons(0xC000 | (question_ptr - response_buffer));
-    answer->type = htons(QD_TYPE_A);
-    answer->class = htons(1);  // IN class
-    answer->ttl = htonl(ANS_TTL_SEC);
-    answer->addr_len = htons(4);  // IPv4 address length
-    answer->ip_addr = ip_addr;
+    uint16_t *ptr_offset = (uint16_t *)answer_ptr;
+    *ptr_offset = htons(0xC000 | (question_ptr - response_buffer));
+    answer_ptr += 2;
     
-    int response_len = query_len + sizeof(dns_answer_t);
+    uint16_t *type = (uint16_t *)answer_ptr;
+    *type = htons(record_type);
+    answer_ptr += 2;
     
-    ESP_LOGI(TAG_DNS32, "Built A record response: %d bytes, IP=0x%08lx", response_len, (unsigned long)ntohl(ip_addr));
+    uint16_t *class = (uint16_t *)answer_ptr;
+    *class = htons(1);  // IN class
+    answer_ptr += 2;
+    
+    uint32_t *ttl_field = (uint32_t *)answer_ptr;
+    *ttl_field = htonl(ttl);
+    answer_ptr += 4;
+    
+    uint16_t *addr_len = (uint16_t *)answer_ptr;
+    *addr_len = htons(data_len);
+    answer_ptr += 2;
+    
+    // Copy the record data
+    if (record_data && data_len > 0) {
+        memcpy(answer_ptr, record_data, data_len);
+        answer_ptr += data_len;
+    }
+    
+    int response_len = answer_ptr - response_buffer;
+    
+    ESP_LOGI(TAG_DNS32, "Built %s record response: %d bytes, data_len=%d", 
+             dns_query_type_name(record_type), response_len, data_len);
     return response_len;
+}
+
+// Build A record response (backward compatibility)
+static int build_simple_a_response(char *query_buffer, int query_len, char *response_buffer, const char *name, uint32_t ip_addr)
+{
+    return build_dns_response_generic(query_buffer, query_len, response_buffer, name, 
+                                     QD_TYPE_A, &ip_addr, 4, ANS_TTL_SEC);
+}
+
+// Build DNS name in wire format (for NS, CNAME responses)
+static int encode_dns_name(const char *name, char *buffer)
+{
+    if (!name || !buffer) return 0;
+    
+    char *start = buffer;
+    const char *label_start = name;
+    const char *dot = strchr(name, '.');
+    
+    while (label_start && *label_start) {
+        int label_len = dot ? (dot - label_start) : strlen(label_start);
+        if (label_len > 63) return 0;  // Label too long
+        
+        *buffer++ = (char)label_len;
+        memcpy(buffer, label_start, label_len);
+        buffer += label_len;
+        
+        if (dot) {
+            label_start = dot + 1;
+            dot = strchr(label_start, '.');
+        } else {
+            break;
+        }
+    }
+    
+    *buffer++ = 0;  // Null terminator
+    return buffer - start;
 }
 
 // Forward query to upstream DNS and return response
@@ -289,6 +346,455 @@ static esp_err_t handle_a_query(
     }
 }
 
+// NS Record Handler - Handles Name Server queries
+static esp_err_t handle_ns_query(
+    dns_query_context_t *ctx,
+    const char *name,
+    uint16_t qtype, 
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer,
+    int *response_len
+)
+{
+    ESP_LOGI(TAG_DNS32, "Handling NS query for %s", name);
+    
+    if (!ctx->is_station_mode) {
+        // AP mode: Return device as authoritative name server for local domain
+        char ns_name[64];
+        int ns_name_len = encode_dns_name(ctx->local_domain, ns_name);
+        
+        if (ns_name_len > 0) {
+            ESP_LOGI(TAG_DNS32, "AP mode: Responding with NS record for %s", ctx->local_domain);
+            *response_len = build_dns_response_generic(query_buffer, query_len, response_buffer, 
+                                                     name, QD_TYPE_NS, ns_name, ns_name_len, ANS_TTL_SEC);
+            
+            if (*response_len > 0) {
+                return ESP_OK;
+            }
+        }
+        
+        ESP_LOGE(TAG_DNS32, "Failed to build NS record response for AP mode");
+        return ESP_FAIL;
+        
+    } else {
+        // Station mode: Forward to upstream DNS
+        if (ctx->upstream_dns && ctx->upstream_dns->count > 0) {
+            ESP_LOGI(TAG_DNS32, "Station mode: Forwarding NS query for %s to upstream DNS", name);
+            
+            *response_len = forward_to_upstream_dns(query_buffer, query_len, response_buffer, 
+                                                   ctx->upstream_dns, name);
+            
+            if (*response_len > 0) {
+                ESP_LOGI(TAG_DNS32, "Successfully forwarded NS query for %s, got %d bytes", name, *response_len);
+                return ESP_OK;
+            } else {
+                ESP_LOGE(TAG_DNS32, "Failed to get response from upstream DNS for %s", name);
+                return ESP_FAIL;
+            }
+        } else {
+            ESP_LOGW(TAG_DNS32, "No upstream DNS servers available for NS query");
+            return ESP_FAIL;
+        }
+    }
+}
+
+// CNAME Record Handler - Handles Canonical Name queries
+static esp_err_t handle_cname_query(
+    dns_query_context_t *ctx,
+    const char *name,
+    uint16_t qtype, 
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer,
+    int *response_len
+)
+{
+    ESP_LOGI(TAG_DNS32, "Handling CNAME query for %s", name);
+    
+    if (!ctx->is_station_mode) {
+        // AP mode: For demonstration, redirect everything to local domain
+        char cname_data[64];
+        int cname_len = encode_dns_name(ctx->local_domain, cname_data);
+        
+        if (cname_len > 0) {
+            ESP_LOGI(TAG_DNS32, "AP mode: Responding with CNAME pointing to %s", ctx->local_domain);
+            *response_len = build_dns_response_generic(query_buffer, query_len, response_buffer, 
+                                                     name, QD_TYPE_CNAME, cname_data, cname_len, ANS_TTL_SEC);
+            
+            if (*response_len > 0) {
+                return ESP_OK;
+            }
+        }
+        
+        ESP_LOGE(TAG_DNS32, "Failed to build CNAME record response for AP mode");
+        return ESP_FAIL;
+        
+    } else {
+        // Station mode: Forward to upstream DNS
+        if (ctx->upstream_dns && ctx->upstream_dns->count > 0) {
+            ESP_LOGI(TAG_DNS32, "Station mode: Forwarding CNAME query for %s to upstream DNS", name);
+            
+            *response_len = forward_to_upstream_dns(query_buffer, query_len, response_buffer, 
+                                                   ctx->upstream_dns, name);
+            
+            if (*response_len > 0) {
+                ESP_LOGI(TAG_DNS32, "Successfully forwarded CNAME query for %s, got %d bytes", name, *response_len);
+                return ESP_OK;
+            } else {
+                ESP_LOGE(TAG_DNS32, "Failed to get response from upstream DNS for %s", name);
+                return ESP_FAIL;
+            }
+        } else {
+            ESP_LOGW(TAG_DNS32, "No upstream DNS servers available for CNAME query");
+            return ESP_FAIL;
+        }
+    }
+}
+
+// SOA Record Handler - Handles Start of Authority queries
+static esp_err_t handle_soa_query(
+    dns_query_context_t *ctx,
+    const char *name,
+    uint16_t qtype, 
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer,
+    int *response_len
+)
+{
+    ESP_LOGI(TAG_DNS32, "Handling SOA query for %s", name);
+    
+    if (!ctx->is_station_mode) {
+        // AP mode: Return basic SOA record for local domain
+        char soa_data[128];
+        char *soa_ptr = soa_data;
+        
+        // Primary name server (local domain)
+        int ns_len = encode_dns_name(ctx->local_domain, soa_ptr);
+        soa_ptr += ns_len;
+        
+        // Responsible mailbox (admin.dns32.local)
+        char admin_name[64];
+        snprintf(admin_name, sizeof(admin_name), "admin.%s", ctx->local_domain);
+        int admin_len = encode_dns_name(admin_name, soa_ptr);
+        soa_ptr += admin_len;
+        
+        // SOA record fields (32-bit each): serial, refresh, retry, expire, minimum
+        uint32_t *soa_fields = (uint32_t *)soa_ptr;
+        soa_fields[0] = htonl(1);      // Serial number
+        soa_fields[1] = htonl(3600);   // Refresh (1 hour)
+        soa_fields[2] = htonl(1800);   // Retry (30 minutes)
+        soa_fields[3] = htonl(604800); // Expire (1 week)
+        soa_fields[4] = htonl(300);    // Minimum TTL (5 minutes)
+        soa_ptr += 20; // 5 * 4 bytes
+        
+        int soa_data_len = soa_ptr - soa_data;
+        
+        ESP_LOGI(TAG_DNS32, "AP mode: Responding with SOA record for %s", ctx->local_domain);
+        *response_len = build_dns_response_generic(query_buffer, query_len, response_buffer, 
+                                                 name, QD_TYPE_SOA, soa_data, soa_data_len, ANS_TTL_SEC);
+        
+        if (*response_len > 0) {
+            return ESP_OK;
+        }
+        
+        ESP_LOGE(TAG_DNS32, "Failed to build SOA record response for AP mode");
+        return ESP_FAIL;
+        
+    } else {
+        // Station mode: Forward to upstream DNS
+        if (ctx->upstream_dns && ctx->upstream_dns->count > 0) {
+            ESP_LOGI(TAG_DNS32, "Station mode: Forwarding SOA query for %s to upstream DNS", name);
+            
+            *response_len = forward_to_upstream_dns(query_buffer, query_len, response_buffer, 
+                                                   ctx->upstream_dns, name);
+            
+            if (*response_len > 0) {
+                ESP_LOGI(TAG_DNS32, "Successfully forwarded SOA query for %s, got %d bytes", name, *response_len);
+                return ESP_OK;
+            } else {
+                ESP_LOGE(TAG_DNS32, "Failed to get response from upstream DNS for %s", name);
+                return ESP_FAIL;
+            }
+        } else {
+            ESP_LOGW(TAG_DNS32, "No upstream DNS servers available for SOA query");
+            return ESP_FAIL;
+        }
+    }
+}
+
+// PTR Record Handler - Handles reverse DNS queries
+static esp_err_t handle_ptr_query(
+    dns_query_context_t *ctx,
+    const char *name,
+    uint16_t qtype, 
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer,
+    int *response_len
+)
+{
+    ESP_LOGI(TAG_DNS32, "Handling PTR query for %s", name);
+    
+    if (!ctx->is_station_mode && g_dns_config.enable_reverse_dns) {
+        // AP mode: Handle reverse DNS for device IP range
+        // Check if this is a reverse lookup for our device IP (192.168.4.1 -> 1.4.168.192.in-addr.arpa)
+        if (strstr(name, "1.4.168.192.in-addr.arpa") != NULL) {
+            char ptr_data[64];
+            int ptr_len = encode_dns_name(ctx->local_domain, ptr_data);
+            
+            if (ptr_len > 0) {
+                ESP_LOGI(TAG_DNS32, "AP mode: Responding with PTR record pointing to %s", ctx->local_domain);
+                *response_len = build_dns_response_generic(query_buffer, query_len, response_buffer, 
+                                                         name, QD_TYPE_PTR, ptr_data, ptr_len, ANS_TTL_SEC);
+                
+                if (*response_len > 0) {
+                    return ESP_OK;
+                }
+            }
+        }
+        
+        ESP_LOGI(TAG_DNS32, "AP mode: No reverse DNS mapping for %s", name);
+        return ESP_FAIL;
+        
+    } else {
+        // Station mode: Forward to upstream DNS
+        if (ctx->upstream_dns && ctx->upstream_dns->count > 0) {
+            ESP_LOGI(TAG_DNS32, "Station mode: Forwarding PTR query for %s to upstream DNS", name);
+            
+            *response_len = forward_to_upstream_dns(query_buffer, query_len, response_buffer, 
+                                                   ctx->upstream_dns, name);
+            
+            if (*response_len > 0) {
+                ESP_LOGI(TAG_DNS32, "Successfully forwarded PTR query for %s, got %d bytes", name, *response_len);
+                return ESP_OK;
+            } else {
+                ESP_LOGE(TAG_DNS32, "Failed to get response from upstream DNS for %s", name);
+                return ESP_FAIL;
+            }
+        } else {
+            ESP_LOGW(TAG_DNS32, "No upstream DNS servers available for PTR query");
+            return ESP_FAIL;
+        }
+    }
+}
+
+// MX Record Handler - Handles Mail Exchange queries
+static esp_err_t handle_mx_query(
+    dns_query_context_t *ctx,
+    const char *name,
+    uint16_t qtype, 
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer,
+    int *response_len
+)
+{
+    ESP_LOGI(TAG_DNS32, "Handling MX query for %s", name);
+    
+    if (!ctx->is_station_mode) {
+        // AP mode: Return basic MX record pointing to local domain
+        char mx_data[68];  // 2 bytes priority + up to 66 bytes for encoded name
+        char *mx_ptr = mx_data;
+        
+        // Priority (16-bit, lower is higher priority)
+        uint16_t *priority = (uint16_t *)mx_ptr;
+        *priority = htons(10);  // Priority 10
+        mx_ptr += 2;
+        
+        // Mail server name
+        char mail_name[64];
+        snprintf(mail_name, sizeof(mail_name), "mail.%s", ctx->local_domain);
+        int mail_len = encode_dns_name(mail_name, mx_ptr);
+        
+        if (mail_len > 0) {
+            int mx_data_len = 2 + mail_len;
+            
+            ESP_LOGI(TAG_DNS32, "AP mode: Responding with MX record for mail.%s", ctx->local_domain);
+            *response_len = build_dns_response_generic(query_buffer, query_len, response_buffer, 
+                                                     name, QD_TYPE_MX, mx_data, mx_data_len, ANS_TTL_SEC);
+            
+            if (*response_len > 0) {
+                return ESP_OK;
+            }
+        }
+        
+        ESP_LOGE(TAG_DNS32, "Failed to build MX record response for AP mode");
+        return ESP_FAIL;
+        
+    } else {
+        // Station mode: Forward to upstream DNS
+        if (ctx->upstream_dns && ctx->upstream_dns->count > 0) {
+            ESP_LOGI(TAG_DNS32, "Station mode: Forwarding MX query for %s to upstream DNS", name);
+            
+            *response_len = forward_to_upstream_dns(query_buffer, query_len, response_buffer, 
+                                                   ctx->upstream_dns, name);
+            
+            if (*response_len > 0) {
+                ESP_LOGI(TAG_DNS32, "Successfully forwarded MX query for %s, got %d bytes", name, *response_len);
+                return ESP_OK;
+            } else {
+                ESP_LOGE(TAG_DNS32, "Failed to get response from upstream DNS for %s", name);
+                return ESP_FAIL;
+            }
+        } else {
+            ESP_LOGW(TAG_DNS32, "No upstream DNS servers available for MX query");
+            return ESP_FAIL;
+        }
+    }
+}
+
+// TXT Record Handler - Handles Text record queries
+static esp_err_t handle_txt_query(
+    dns_query_context_t *ctx,
+    const char *name,
+    uint16_t qtype, 
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer,
+    int *response_len
+)
+{
+    ESP_LOGI(TAG_DNS32, "Handling TXT query for %s", name);
+    
+    if (!ctx->is_station_mode && g_dns_config.enable_device_info_txt) {
+        // AP mode: Return device information in TXT record
+        char txt_data[128];
+        char *txt_ptr = txt_data;
+        
+        // TXT records are encoded as length-prefixed strings
+        const char *version_info = "version=DNS32-v1.0";
+        int version_len = strlen(version_info);
+        *txt_ptr++ = (char)version_len;
+        memcpy(txt_ptr, version_info, version_len);
+        txt_ptr += version_len;
+        
+        const char *device_info = "device=ESP32";
+        int device_len = strlen(device_info);
+        *txt_ptr++ = (char)device_len;
+        memcpy(txt_ptr, device_info, device_len);
+        txt_ptr += device_len;
+        
+        const char *service_info = "service=DNS-Adblocker";
+        int service_len = strlen(service_info);
+        *txt_ptr++ = (char)service_len;
+        memcpy(txt_ptr, service_info, service_len);
+        txt_ptr += service_len;
+        
+        int txt_data_len = txt_ptr - txt_data;
+        
+        ESP_LOGI(TAG_DNS32, "AP mode: Responding with TXT record containing device info");
+        *response_len = build_dns_response_generic(query_buffer, query_len, response_buffer, 
+                                                 name, QD_TYPE_TXT, txt_data, txt_data_len, ANS_TTL_SEC);
+        
+        if (*response_len > 0) {
+            return ESP_OK;
+        }
+        
+        ESP_LOGE(TAG_DNS32, "Failed to build TXT record response for AP mode");
+        return ESP_FAIL;
+        
+    } else {
+        // Station mode: Forward to upstream DNS
+        if (ctx->upstream_dns && ctx->upstream_dns->count > 0) {
+            ESP_LOGI(TAG_DNS32, "Station mode: Forwarding TXT query for %s to upstream DNS", name);
+            
+            *response_len = forward_to_upstream_dns(query_buffer, query_len, response_buffer, 
+                                                   ctx->upstream_dns, name);
+            
+            if (*response_len > 0) {
+                ESP_LOGI(TAG_DNS32, "Successfully forwarded TXT query for %s, got %d bytes", name, *response_len);
+                return ESP_OK;
+            } else {
+                ESP_LOGE(TAG_DNS32, "Failed to get response from upstream DNS for %s", name);
+                return ESP_FAIL;
+            }
+        } else {
+            ESP_LOGW(TAG_DNS32, "No upstream DNS servers available for TXT query");
+            return ESP_FAIL;
+        }
+    }
+}
+
+// SRV Record Handler - Handles Service record queries
+static esp_err_t handle_srv_query(
+    dns_query_context_t *ctx,
+    const char *name,
+    uint16_t qtype, 
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer,
+    int *response_len
+)
+{
+    ESP_LOGI(TAG_DNS32, "Handling SRV query for %s", name);
+    
+    if (!ctx->is_station_mode) {
+        // AP mode: Return basic SRV record for HTTP service
+        char srv_data[128];
+        char *srv_ptr = srv_data;
+        
+        // SRV record format: Priority (2 bytes) + Weight (2 bytes) + Port (2 bytes) + Target
+        uint16_t *priority = (uint16_t *)srv_ptr;
+        *priority = htons(10);  // Priority 10
+        srv_ptr += 2;
+        
+        uint16_t *weight = (uint16_t *)srv_ptr;
+        *weight = htons(1);  // Weight 1
+        srv_ptr += 2;
+        
+        uint16_t *port = (uint16_t *)srv_ptr;
+        *port = htons(80);  // HTTP port
+        srv_ptr += 2;
+        
+        // Target host (local domain)
+        int target_len = encode_dns_name(ctx->local_domain, srv_ptr);
+        
+        if (target_len > 0) {
+            int srv_data_len = 6 + target_len;  // 3 * 2 bytes + target name
+            
+            ESP_LOGI(TAG_DNS32, "AP mode: Responding with SRV record for HTTP service on %s:80", ctx->local_domain);
+            *response_len = build_dns_response_generic(query_buffer, query_len, response_buffer, 
+                                                     name, QD_TYPE_SRV, srv_data, srv_data_len, ANS_TTL_SEC);
+            
+            if (*response_len > 0) {
+                return ESP_OK;
+            }
+        }
+        
+        ESP_LOGE(TAG_DNS32, "Failed to build SRV record response for AP mode");
+        return ESP_FAIL;
+        
+    } else {
+        // Station mode: Forward to upstream DNS
+        if (ctx->upstream_dns && ctx->upstream_dns->count > 0) {
+            ESP_LOGI(TAG_DNS32, "Station mode: Forwarding SRV query for %s to upstream DNS", name);
+            
+            *response_len = forward_to_upstream_dns(query_buffer, query_len, response_buffer, 
+                                                   ctx->upstream_dns, name);
+            
+            if (*response_len > 0) {
+                ESP_LOGI(TAG_DNS32, "Successfully forwarded SRV query for %s, got %d bytes", name, *response_len);
+                return ESP_OK;
+            } else {
+                ESP_LOGE(TAG_DNS32, "Failed to get response from upstream DNS for %s", name);
+                return ESP_FAIL;
+            }
+        } else {
+            ESP_LOGW(TAG_DNS32, "No upstream DNS servers available for SRV query");
+            return ESP_FAIL;
+        }
+    }
+}
+
 // Default handler for unsupported query types
 static esp_err_t handle_unsupported_query(
     dns_query_context_t *ctx,
@@ -359,8 +865,15 @@ static esp_err_t init_dns_handlers(void)
 {
     ESP_LOGI(TAG_DNS32, "Initializing DNS query handlers");
     
-    // Register A record handler
+    // Register all supported query type handlers
     ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_A, handle_a_query, "A"));
+    ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_NS, handle_ns_query, "NS"));
+    ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_CNAME, handle_cname_query, "CNAME"));
+    ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_SOA, handle_soa_query, "SOA"));
+    ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_PTR, handle_ptr_query, "PTR"));
+    ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_MX, handle_mx_query, "MX"));
+    ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_TXT, handle_txt_query, "TXT"));
+    ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_SRV, handle_srv_query, "SRV"));
     
     ESP_LOGI(TAG_DNS32, "DNS handlers initialized, %d handlers registered", dns_handler_count);
     return ESP_OK;
