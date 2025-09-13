@@ -1,3 +1,5 @@
+#pragma once
+
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
@@ -15,10 +17,10 @@
 #include <lwip/sockets.h>
 #include <lwip/sys.h>
 
-static const char *TAG_DNS32 = "dns32";
-static const char *TAG_AP = "softap";
-static const char *TAG_STA = "sta";
-static const char *TAG_HTTP = "http";
+extern const char *TAG_DNS32;
+extern const char *TAG_AP;
+extern const char *TAG_STA;
+extern const char *TAG_HTTP;
 
 #define DNS_PORT (53)
 #define DNS_MAX_LEN (256)
@@ -62,6 +64,3 @@ typedef struct __attribute__((__packed__))
     uint16_t addr_len;
     uint32_t ip_addr;
 } dns_answer_t;
-
-// Function to update global upstream DNS servers from wifi event handler
-void update_global_upstream_dns_servers(esp_netif_t *netif);

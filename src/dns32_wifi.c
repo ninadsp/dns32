@@ -1,7 +1,8 @@
 #include "dns32.h"
 #include "dns32_wifi.h"
+#include "dns32_server.h"
 
-int32_t wifi_scan_last_status = NULL;
+int32_t wifi_scan_last_status = 0;
 uint16_t scan_results_count = 0;
 wifi_ap_record_t scan_results[DNS32_WIFI_AP_MAX_APS];
 static int wifi_conn_retry_count = 0;
@@ -16,7 +17,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&scan_results_count));
         // TODO: number will change value if we have more than max_aps, and then we run into heap corruption
         // in get_wifi_scan_results, that we need to fix/account for
-        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, &scan_results));
+        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, scan_results));
         if (scan_results_count == 0)
         {
             wifi_scan_last_status = DNS32_WIFI_SCAN_FAILED;
@@ -46,16 +47,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG_STA, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
 
-        esp_netif_dns_info_t dns_info;
         esp_netif_t *netif = event->esp_netif;
-
-        for (int i = 0; i < ESP_NETIF_DNS_MAX; ++i)
-        {
-            if (esp_netif_get_dns_info(netif, i, &dns_info) == ESP_OK)
-            {
-                ESP_LOGI(TAG_STA, "DNS%d: " IPSTR, i, IP2STR(&dns_info.ip.u_addr.ip4));
-            }
-        }
 
         // Update the global upstream DNS servers for dns_server_task
         ESP_LOGI(TAG_STA, "Updating upstream DNS servers for DNS recursive client");
@@ -195,7 +187,7 @@ bool validate_wifi_credentials(char *wifiindex, char *wifipassword)
         return false;
     };
 
-    long parsed_index = strtol(wifiindex, endptr, 0);
+    long parsed_index = strtol(wifiindex, &endptr, 0);
     if (endptr == wifiindex)
     {
         ESP_LOGE(TAG_AP, "WiFi name validation failed");
@@ -220,7 +212,7 @@ bool validate_wifi_credentials(char *wifiindex, char *wifipassword)
 esp_err_t store_wifi_credentials(char *wifiindex, char *wifipassword)
 {
     char *endptr = NULL;
-    long parsed_index = strtol(wifiindex, endptr, 0);
+    long parsed_index = strtol(wifiindex, &endptr, 0);
     ESP_LOGI(TAG_AP, "Selected wifi name is %s", scan_results[parsed_index].ssid);
     ESP_RETURN_ON_ERROR(set_wifi_credentials((char *)scan_results[parsed_index].ssid, wifipassword), TAG_AP, "Unable to store wifi credentials");
     return ESP_OK;
