@@ -62,3 +62,6 @@ typedef struct __attribute__((__packed__))
     uint16_t addr_len;
     uint32_t ip_addr;
 } dns_answer_t;
+
+// Function to update global upstream DNS servers from wifi event handler
+void update_global_upstream_dns_servers(esp_netif_t *netif);

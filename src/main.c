@@ -3,6 +3,10 @@
 #include "dns32_wifi.h"
 #include "dns32_http.h"
 
+// Global upstream DNS servers and notification mechanism
+static upstream_dns_servers_t g_upstream_dns = {0};
+static SemaphoreHandle_t dns_update_semaphore = NULL;
+
 /*
     Parse the name from the packet from the DNS name format to a regular .-seperated name
     returns the pointer to the next part of the packet
@@ -37,25 +41,30 @@ static char *parse_dns_name(char *raw_name, char *parsed_name, size_t parsed_nam
     return label + 1;
 }
 
-static esp_err_t get_upstream_dns_servers(upstream_dns_servers_t *dns_servers)
+void update_global_upstream_dns_servers(esp_netif_t *netif)
 {
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    
-    dns_servers->count = 0;
-    esp_netif_dns_info_t dns_info;
+    if (dns_update_semaphore != NULL) {
+        // Take semaphore to safely update global DNS servers
+        if (xSemaphoreTake(dns_update_semaphore, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            g_upstream_dns.count = 0;
+            esp_netif_dns_info_t dns_info;
 
-    for (int i = ESP_NETIF_DNS_MAIN; i < ESP_NETIF_DNS_MAX && dns_servers->count < MAX_DNS_SERVERS; i++) {
-        esp_err_t ret = esp_netif_get_dns_info(netif, i, &dns_info);
-        if (ret == ESP_OK && dns_info.ip.u_addr.ip4.addr != 0) {
-            dns_servers->servers[dns_servers->count] = dns_info.ip.u_addr.ip4;
-            ESP_LOGI(TAG_DNS32, "Found DNS server %d: " IPSTR, 
-                     dns_servers->count, IP2STR(&dns_info.ip.u_addr.ip4));
-            dns_servers->count++;
+            for (int i = ESP_NETIF_DNS_MAIN; i < ESP_NETIF_DNS_MAX && g_upstream_dns.count < MAX_DNS_SERVERS; i++) {
+                esp_err_t ret = esp_netif_get_dns_info(netif, i, &dns_info);
+                if (ret == ESP_OK && dns_info.ip.u_addr.ip4.addr != 0) {
+                    g_upstream_dns.servers[g_upstream_dns.count] = dns_info.ip.u_addr.ip4;
+                    ESP_LOGI(TAG_DNS32, "Updated global DNS server %d: " IPSTR, 
+                             g_upstream_dns.count, IP2STR(&dns_info.ip.u_addr.ip4));
+                    g_upstream_dns.count++;
+                }
+            }
+
+            ESP_LOGI(TAG_DNS32, "Updated global upstream DNS servers count: %d", g_upstream_dns.count);
+            xSemaphoreGive(dns_update_semaphore);
+        } else {
+            ESP_LOGW(TAG_DNS32, "Failed to take DNS update semaphore");
         }
     }
-
-    ESP_LOGI(TAG_DNS32, "Discovered %d upstream DNS servers", dns_servers->count);
-    return ESP_OK;
 }
 
 static void dns_server_task(void *pvParameters)
@@ -65,17 +74,8 @@ static void dns_server_task(void *pvParameters)
     const int addr_family = AF_INET;
     const int ip_protocol = IPPROTO_IP;
     bool is_station_mode = (bool)pvParameters;
-    upstream_dns_servers_t upstream_dns = {0};
 
     ESP_LOGI(TAG_DNS32, "bool is_station_mode: %s", is_station_mode ? "true" : "false");
-
-    if (is_station_mode) {
-        ESP_LOGI(TAG_DNS32, "Querying for upstream DNS servers...");
-        esp_err_t ret = get_upstream_dns_servers(&upstream_dns);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG_DNS32, "Failed to get upstream DNS servers");
-        }
-    }
 
     struct sockaddr_in dest_addr;
 
@@ -241,12 +241,118 @@ static void dns_server_task(void *pvParameters)
                 }
                 else
                 {
+                    // Station mode: implement recursive DNS querying
+                    // Use global upstream DNS servers (updated by wifi event handler)
+                    upstream_dns_servers_t current_upstream_dns = {0};
+                    if (dns_update_semaphore != NULL && xSemaphoreTake(dns_update_semaphore, pdMS_TO_TICKS(100)) == pdTRUE) {
+                        current_upstream_dns = g_upstream_dns;
+                        xSemaphoreGive(dns_update_semaphore);
+                    }
+                    
+                    if (current_upstream_dns.count > 0) {
+                        // Parse the incoming DNS query
+                        dns_header_t *header = (dns_header_t *)rx_buffer;
+                        ESP_LOGI(TAG_DNS32, "Received DNS query with header id: 0x%X, flags 0x%X, qd_count: %d",
+                                 ntohs(header->id), ntohs(header->flags), ntohs(header->qd_count));
 
-                    int err = sendto(sock, rx_buffer, len, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
-                    if (err < 0)
-                    {
-                        ESP_LOGE(TAG_DNS32, "Could not send back UDP response: errno %s", strerror(errno));
-                        break;
+                        uint16_t qd_count = ntohs(header->qd_count);
+                        char *cur_qd_ptr = rx_buffer + sizeof(dns_header_t);
+                        char name[128];
+                        bool should_forward = false;
+
+                        // Check if this is an A query that we should forward
+                        for (int qd_i = 0; qd_i < qd_count; qd_i++) {
+                            char *name_end_ptr = parse_dns_name(cur_qd_ptr, name, sizeof(name));
+                            if (name_end_ptr == NULL) {
+                                ESP_LOGE(TAG_DNS32, "Failed parsing the requested DNS name");
+                                break;
+                            }
+
+                            dns_question_t *question = (dns_question_t *)(name_end_ptr);
+                            uint16_t qd_type = ntohs(question->type);
+                            uint16_t qd_class = ntohs(question->class);
+
+                            ESP_LOGI(TAG_DNS32, "Query type: %d, class: %d, question for: %s", qd_type, qd_class, name);
+
+                            if (qd_type == QD_TYPE_A) {
+                                should_forward = true;
+                                break;
+                            }
+                        }
+
+                        if (should_forward) {
+                            // Create socket for upstream DNS query
+                            int upstream_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+                            if (upstream_sock < 0) {
+                                ESP_LOGE(TAG_DNS32, "Unable to create socket for upstream DNS query");
+                            } else {
+                                // Set up upstream DNS server address (use first server)
+                                struct sockaddr_in upstream_addr;
+                                upstream_addr.sin_family = AF_INET;
+                                upstream_addr.sin_port = htons(53);
+                                upstream_addr.sin_addr.s_addr = current_upstream_dns.servers[0].addr;
+
+                                char upstream_ip_str[16];
+                                inet_ntoa_r(current_upstream_dns.servers[0], upstream_ip_str, sizeof(upstream_ip_str));
+                                ESP_LOGI(TAG_DNS32, "Forwarding DNS query for %s to upstream server %s", name, upstream_ip_str);
+
+                                // Forward the query to upstream DNS
+                                int send_result = sendto(upstream_sock, rx_buffer, len, 0, 
+                                                       (struct sockaddr *)&upstream_addr, sizeof(upstream_addr));
+                                if (send_result < 0) {
+                                    ESP_LOGE(TAG_DNS32, "Failed to send query to upstream DNS: errno %s", strerror(errno));
+                                } else {
+                                    // Set receive timeout
+                                    struct timeval timeout;
+                                    timeout.tv_sec = 5;
+                                    timeout.tv_usec = 0;
+                                    setsockopt(upstream_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+                                    // Receive response from upstream DNS
+                                    char upstream_response[DNS_MAX_LEN];
+                                    struct sockaddr_in upstream_response_addr;
+                                    socklen_t upstream_response_len = sizeof(upstream_response_addr);
+                                    
+                                    int recv_len = recvfrom(upstream_sock, upstream_response, sizeof(upstream_response), 0,
+                                                          (struct sockaddr *)&upstream_response_addr, &upstream_response_len);
+                                    
+                                    if (recv_len > 0) {
+                                        ESP_LOGI(TAG_DNS32, "Received %d bytes from upstream DNS server %s", recv_len, upstream_ip_str);
+                                        
+                                        // Parse and log the response
+                                        dns_header_t *response_header = (dns_header_t *)upstream_response;
+                                        ESP_LOGI(TAG_DNS32, "Upstream response: id=0x%X, flags=0x%X, answers=%d", 
+                                                ntohs(response_header->id), ntohs(response_header->flags), ntohs(response_header->an_count));
+                                        
+                                        // Forward the response back to client
+                                        int forward_result = sendto(sock, upstream_response, recv_len, 0, 
+                                                                  (struct sockaddr *)&source_addr, sizeof(source_addr));
+                                        if (forward_result < 0) {
+                                            ESP_LOGE(TAG_DNS32, "Failed to forward response to client: errno %s", strerror(errno));
+                                        } else {
+                                            ESP_LOGI(TAG_DNS32, "Successfully forwarded DNS response to client %s", addr_str);
+                                        }
+                                    } else {
+                                        ESP_LOGE(TAG_DNS32, "Failed to receive response from upstream DNS: errno %s", strerror(errno));
+                                    }
+                                }
+                                close(upstream_sock);
+                            }
+                        } else {
+                            // Not an A query, send back the original query as-is
+                            int err = sendto(sock, rx_buffer, len, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
+                            if (err < 0) {
+                                ESP_LOGE(TAG_DNS32, "Could not send back UDP response: errno %s", strerror(errno));
+                                break;
+                            }
+                        }
+                    } else {
+                        ESP_LOGI(TAG_DNS32, "No upstream DNS servers available, echoing query");
+                        int err = sendto(sock, rx_buffer, len, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
+                        if (err < 0) {
+                            ESP_LOGE(TAG_DNS32, "Could not send back UDP response: errno %s", strerror(errno));
+                            break;
+                        }
                     }
                 }
 
@@ -267,6 +373,12 @@ void app_main(void)
 {
     httpd_handle_t *http_server = NULL;
     bool is_station_mode;
+
+    // Create semaphore for DNS server updates
+    dns_update_semaphore = xSemaphoreCreateMutex();
+    if (dns_update_semaphore == NULL) {
+        ESP_LOGE(TAG_DNS32, "Failed to create DNS update semaphore");
+    }
 
     esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
     esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);

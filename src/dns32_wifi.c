@@ -56,6 +56,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
                 ESP_LOGI(TAG_STA, "DNS%d: " IPSTR, i, IP2STR(&dns_info.ip.u_addr.ip4));
             }
         }
+
+        // Update the global upstream DNS servers for dns_server_task
+        ESP_LOGI(TAG_STA, "Updating upstream DNS servers for DNS recursive client");
+        update_global_upstream_dns_servers(netif);
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
