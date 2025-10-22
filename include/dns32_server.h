@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dns32.h"
+#include "dns32_blocklist.h"
 
 // DNS server initialization and task management
 esp_err_t dns_server_init(void);

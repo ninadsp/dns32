@@ -39,6 +39,7 @@ esp_err_t set_wifi_credentials(char *ssid, char *password)
 {
     nvs_handle nvs_wifi_rw;
 
+    // Can we make this a DB style transaction block? How is the nvs handle unwound in an _ON_ERROR condition
     ESP_RETURN_ON_ERROR(nvs_open(DNS32_NVS_WIFI_NS, NVS_READWRITE, &nvs_wifi_rw), TAG_DNS32, "Failed to access NVS for writing WiFi credentials");
     ESP_RETURN_ON_ERROR(nvs_set_str(nvs_wifi_rw, "ssid", ssid), TAG_DNS32, "Cannot write WiFi name");
     ESP_RETURN_ON_ERROR(nvs_set_str(nvs_wifi_rw, "password", password), TAG_DNS32, "Cannot write WiFi password");

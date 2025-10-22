@@ -9,6 +9,7 @@ const char *TAG_DNS32 = "dns32";
 const char *TAG_AP = "softap";
 const char *TAG_STA = "sta";
 const char *TAG_HTTP = "http";
+const char *TAG_BLOCKLIST = "DNS32_BLOCKLIST";
 
 
 void app_main(void)
@@ -48,7 +49,6 @@ void app_main(void)
         ESP_ERROR_CHECK_WITHOUT_ABORT(setup_softap());
         ESP_ERROR_CHECK_WITHOUT_ABORT(initiate_wifi_scan_async());
         is_station_mode = false;
-        // TODO: Implement a basic DNS server so that mDNS can work?
     }
 
     assert(http_server == NULL);

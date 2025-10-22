@@ -2,6 +2,7 @@
 #include "dns32_http.h"
 #include "dns32_web_fragments.h"
 #include "dns32_wifi.h"
+#include "dns32_blocklist.h"
 
 static esp_err_t hello_get_handler(httpd_req_t *req)
 {
@@ -66,6 +67,23 @@ static esp_err_t index_get_handler(httpd_req_t *req)
         wifi_ap_record_t current_ap_info;
         ESP_ERROR_CHECK(esp_wifi_sta_get_ap_info(&current_ap_info));
         RENDER_AND_SEND_CHUNK(req, HTML_FRAGMENT_STATUS_PAGE, current_ap_info.ssid );
+
+        // Add blocklist statistics
+        blocklist_stats_t stats = blocklist_get_stats();
+        const char* status_str = stats.is_loaded ? "Active" : "Not Loaded";
+        double block_rate = 0.0;
+        if ((stats.queries_blocked + stats.queries_allowed) > 0) {
+            block_rate = (double)stats.queries_blocked / (stats.queries_blocked + stats.queries_allowed) * 100.0;
+        }
+
+        RENDER_AND_SEND_CHUNK(req, HTML_FRAGMENT_BLOCKLIST_STATS,
+                            status_str,
+                            stats.total_domains,
+                            stats.queries_blocked,
+                            stats.queries_allowed,
+                            block_rate,
+                            stats.estimated_false_positive_rate * 100.0);
+
     }
 
     ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(req,
@@ -86,6 +104,8 @@ static esp_err_t wifi_configure_post_handler(httpd_req_t *req)
     size_t recv_size;
     if (req->content_len > sizeof(content) - 1)
     {
+        // We received a larger POST request than our buffer.
+        // Should we silently truncate like this, or fail loudly?
         recv_size = sizeof(content) - 1;
     }
     else
@@ -127,7 +147,7 @@ static esp_err_t wifi_configure_post_handler(httpd_req_t *req)
         *equal_pos = '\0';
         if (strlen(equal_pos + 1) == 0)
         {
-            // ideally, we'll validate this on the client side
+            // TODO: Also validate this on the client side
             ESP_LOGI(TAG_HTTP, "Received an empty form field %s", start_of_content);
             const char resp[] = "Please select a Wifi network";
             httpd_resp_send(req, resp, strlen(resp));
@@ -160,6 +180,7 @@ static esp_err_t wifi_configure_post_handler(httpd_req_t *req)
     }
     else
     {
+        // TODO: Send the user back to a home page with a 302
         ESP_LOGE(TAG_HTTP, "Incorrect WiFi information provided");
         const char resp[] = "WiFi configuration failed during validation";
         httpd_resp_send(req, resp, strlen(resp));

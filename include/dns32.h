@@ -21,6 +21,7 @@ extern const char *TAG_DNS32;
 extern const char *TAG_AP;
 extern const char *TAG_STA;
 extern const char *TAG_HTTP;
+extern const char *TAG_BLOCKLIST;
 
 #define DNS_PORT (53)
 #define DNS_MAX_LEN (256)
@@ -39,6 +40,7 @@ extern const char *TAG_HTTP;
 #define QD_TYPE_MX      (0x000F)  // Mail exchange
 #define QD_TYPE_TXT     (0x0010)  // Text record
 #define QD_TYPE_SRV     (0x0021)  // Service record
+#define QD_TYPE_AAAA    (0x001C)  // IPv6 address
 
 // Storage for upstream DNS servers
 typedef struct {

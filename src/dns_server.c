@@ -1,4 +1,6 @@
 #include "dns32_server.h"
+#include "dns32_blocklist.h"
+#include "embedded_hosts.h"
 
 // Global upstream DNS servers and notification mechanism
 static upstream_dns_servers_t g_upstream_dns = {0};
@@ -62,6 +64,7 @@ void update_global_upstream_dns_servers(esp_netif_t *netif)
 
             for (int i = ESP_NETIF_DNS_MAIN; i < ESP_NETIF_DNS_MAX && g_upstream_dns.count < MAX_DNS_SERVERS; i++) {
                 esp_err_t ret = esp_netif_get_dns_info(netif, i, &dns_info);
+                // TODO: Ensure we're not storing our own IP address in this list
                 if (ret == ESP_OK && dns_info.ip.u_addr.ip4.addr != 0) {
                     g_upstream_dns.servers[g_upstream_dns.count] = dns_info.ip.u_addr.ip4;
                     ESP_LOGI(TAG_DNS32, "Updated global DNS server %d: " IPSTR, 
@@ -133,6 +136,7 @@ const char* dns_query_type_name(uint16_t query_type)
         case QD_TYPE_MX: return "MX";
         case QD_TYPE_TXT: return "TXT";
         case QD_TYPE_SRV: return "SRV";
+        case QD_TYPE_AAAA: return "AAAA";
         default: return "UNKNOWN";
     }
 }
@@ -297,7 +301,7 @@ static int forward_to_upstream_dns(char *query_buffer, int query_len, char *resp
 static esp_err_t handle_a_query(
     dns_query_context_t *ctx,
     const char *name,
-    uint16_t qtype, 
+    uint16_t qtype,
     uint16_t qclass,
     char *query_buffer,
     int query_len,
@@ -306,6 +310,22 @@ static esp_err_t handle_a_query(
 )
 {
     ESP_LOGI(TAG_DNS32, "Handling A query for %s", name);
+
+    // Check blocklist first (works in both AP and Station modes)
+    if (blocklist_is_blocked(name)) {
+        ESP_LOGI(TAG_DNS32, "Domain %s is blocked by blocklist", name);
+
+        // Return NXDOMAIN response for blocked domains
+        memcpy(response_buffer, query_buffer, query_len);
+        dns_header_t *header = (dns_header_t *)response_buffer;
+        header->flags |= htons(QR_FLAG | 0x0003);  // Set QR flag and NXDOMAIN (RCODE=3)
+        header->an_count = htons(0);  // No answers
+        header->ar_count = htons(0);  // No additional records
+
+        *response_len = query_len;  // Just return the query with modified header
+        ESP_LOGI(TAG_DNS32, "Sent NXDOMAIN response for blocked domain %s", name);
+        return ESP_OK;
+    }
     
     if (!ctx->is_station_mode) {
         // AP mode: Return device IP
@@ -723,6 +743,57 @@ static esp_err_t handle_txt_query(
     }
 }
 
+// AAAA Record Handler - Handles IPv6 address queries
+static esp_err_t handle_aaaa_query(
+    dns_query_context_t *ctx,
+    const char *name,
+    uint16_t qtype,
+    uint16_t qclass,
+    char *query_buffer,
+    int query_len,
+    char *response_buffer,
+    int *response_len
+)
+{
+    ESP_LOGI(TAG_DNS32, "Handling AAAA query for %s", name);
+
+    // Check blocklist first (same as A records)
+    if (blocklist_is_blocked(name)) {
+        ESP_LOGI(TAG_DNS32, "Domain %s is blocked by blocklist", name);
+
+        // Return NXDOMAIN response for blocked domains
+        memcpy(response_buffer, query_buffer, query_len);
+        dns_header_t *header = (dns_header_t *)response_buffer;
+        header->flags |= htons(QR_FLAG | 0x0003);  // Set QR flag and NXDOMAIN (RCODE=3)
+        header->an_count = htons(0);  // No answers
+        header->ar_count = htons(0);  // No additional records
+
+        *response_len = query_len;  // Just return the query with modified header
+        ESP_LOGI(TAG_DNS32, "Sent NXDOMAIN response for blocked domain %s", name);
+        return ESP_OK;
+    }
+
+    // For both AP and Station mode: Forward AAAA queries to upstream DNS
+    // We don't handle IPv6 locally in AP mode since our device only has IPv4
+    if (ctx->upstream_dns && ctx->upstream_dns->count > 0) {
+        ESP_LOGI(TAG_DNS32, "Forwarding AAAA query for %s to upstream DNS", name);
+
+        *response_len = forward_to_upstream_dns(query_buffer, query_len, response_buffer,
+                                               ctx->upstream_dns, name);
+
+        if (*response_len > 0) {
+            ESP_LOGI(TAG_DNS32, "Successfully forwarded AAAA query for %s, got %d bytes", name, *response_len);
+            return ESP_OK;
+        } else {
+            ESP_LOGE(TAG_DNS32, "Failed to get response from upstream DNS for %s", name);
+            return ESP_FAIL;
+        }
+    } else {
+        ESP_LOGW(TAG_DNS32, "No upstream DNS servers available for AAAA query");
+        return ESP_FAIL;
+    }
+}
+
 // SRV Record Handler - Handles Service record queries
 static esp_err_t handle_srv_query(
     dns_query_context_t *ctx,
@@ -874,6 +945,7 @@ static esp_err_t init_dns_handlers(void)
     ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_MX, handle_mx_query, "MX"));
     ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_TXT, handle_txt_query, "TXT"));
     ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_SRV, handle_srv_query, "SRV"));
+    ESP_ERROR_CHECK(dns_handler_register(QD_TYPE_AAAA, handle_aaaa_query, "AAAA"));
     
     ESP_LOGI(TAG_DNS32, "DNS handlers initialized, %d handlers registered", dns_handler_count);
     return ESP_OK;
@@ -1031,13 +1103,7 @@ static void dns_server_task(void *pvParameters)
                     }
                 }
 
-                if (sock != -1)
-                {
-                    ESP_LOGI(TAG_DNS32, "Closing socket");
-                    shutdown(sock, 0);
-                    close(sock);
-                    break;
-                }
+                // Continue listening for more queries - don't close the socket
             }
         }
     }
@@ -1052,10 +1118,37 @@ esp_err_t dns_server_init(void)
         ESP_LOGE(TAG_DNS32, "Failed to create DNS update semaphore");
         return ESP_FAIL;
     }
-    
+
     // Initialize DNS query handlers
     ESP_ERROR_CHECK(init_dns_handlers());
-    
+
+    // Initialize blocklist subsystem
+    esp_err_t blocklist_err = blocklist_init();
+    if (blocklist_err != ESP_OK) {
+        ESP_LOGE(TAG_DNS32, "Failed to initialize blocklist: %s", esp_err_to_name(blocklist_err));
+        // Continue without blocklist functionality
+    } else {
+        // Try to load existing blocklist
+        esp_err_t load_err = blocklist_load_from_partition();
+        if (load_err == ESP_OK) {
+            blocklist_stats_t stats = blocklist_get_stats();
+            ESP_LOGI(TAG_DNS32, "Blocklist loaded: %lu domains", stats.total_domains);
+        } else {
+            ESP_LOGW(TAG_DNS32, "No existing blocklist found, initializing with embedded hosts data");
+            // Initialize with embedded hosts data
+            esp_err_t embed_err = blocklist_init_with_embedded_data(
+                (const char*)embedded_hosts_data, embedded_hosts_data_length);
+            if (embed_err == ESP_OK) {
+                blocklist_stats_t stats = blocklist_get_stats();
+                ESP_LOGI(TAG_DNS32, "Initialized blocklist with embedded data: %lu domains",
+                         stats.total_domains);
+            } else {
+                ESP_LOGE(TAG_DNS32, "Failed to initialize with embedded hosts data: %s",
+                         esp_err_to_name(embed_err));
+            }
+        }
+    }
+
     ESP_LOGI(TAG_DNS32, "DNS server initialized with %d handlers", dns_handler_count);
     return ESP_OK;
 }

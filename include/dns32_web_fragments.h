@@ -64,5 +64,15 @@ const char *HTML_FRAGMENT_WIFI_SELECTOR_TABLE_FOOTER = "      </tbody>\n"
 
 const char *HTML_FRAGMENT_STATUS_PAGE = "		<h2>Currently connected to %s</h2>\n";
 
+const char *HTML_FRAGMENT_BLOCKLIST_STATS = "    <h3>DNS Blocklist Statistics</h3>\n"
+"    <table style='margin-top: 10px; border-collapse: collapse;'>\n"
+"      <tr><td style='padding: 5px;'><strong>Status:</strong></td><td style='padding: 5px;'>%s</td></tr>\n"
+"      <tr><td style='padding: 5px;'><strong>Domains Loaded:</strong></td><td style='padding: 5px;'>%lu</td></tr>\n"
+"      <tr><td style='padding: 5px;'><strong>Queries Blocked:</strong></td><td style='padding: 5px;'>%lu</td></tr>\n"
+"      <tr><td style='padding: 5px;'><strong>Queries Allowed:</strong></td><td style='padding: 5px;'>%lu</td></tr>\n"
+"      <tr><td style='padding: 5px;'><strong>Block Rate:</strong></td><td style='padding: 5px;'>%.1f%%</td></tr>\n"
+"      <tr><td style='padding: 5px;'><strong>Est. False Positive Rate:</strong></td><td style='padding: 5px;'>%.3f%%</td></tr>\n"
+"    </table>\n";
+
 const char *HTML_FRAGMENT_COMMON_END = "  </body>\n"
 "</html>\n";
